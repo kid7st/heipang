@@ -29,6 +29,7 @@ import type {
 	Task,
 	ThinkingLevel,
 	UIMessage,
+	UsageInfo,
 	WorkspaceInfo,
 } from "../shared/types.js";
 
@@ -88,6 +89,11 @@ export class Driver {
 
 	private sentUiCount = 0;
 	private msgFlushTimer?: ReturnType<typeof setTimeout>;
+
+	// live-usage cache (the upstream usage endpoints rate-limit aggressively → 429)
+	private usageCache = new Map<string, { ts: number; value: UsageInfo }>();
+	private usageInflight = new Map<string, Promise<UsageInfo>>();
+	private static readonly USAGE_TTL = 60_000;
 
 	private onMessages?: (messages: UIMessage[]) => void;
 	private onMessagesPatch?: (from: number, messages: UIMessage[]) => void;
@@ -882,15 +888,34 @@ export class Driver {
 	}
 
 	/** Live usage for the active model's provider (Claude Max / ChatGPT Codex). */
-	async getUsage(): Promise<{
-		provider?: string;
-		fiveHour?: { pct: number; resetsAt: string | null };
-		sevenDay?: { pct: number; resetsAt: string | null };
-		error?: string;
-	}> {
+	async getUsage(): Promise<UsageInfo> {
 		const provider = this.session?.model?.provider ?? this.settings.getDefaultProvider();
 		if (!provider) return { error: "No active provider" };
 		if (provider !== "anthropic" && provider !== "openai-codex") return { provider, error: "Usage not available for this provider" };
+
+		// Serve fresh cache without touching the network (avoids 429 from frequent polling).
+		const cached = this.usageCache.get(provider);
+		if (cached && Date.now() - cached.ts < Driver.USAGE_TTL) return cached.value;
+
+		// Coalesce concurrent callers (mount + stream-end + /usage can fire together).
+		const inflight = this.usageInflight.get(provider);
+		if (inflight) return inflight;
+		const p = this.fetchUsage(provider).finally(() => this.usageInflight.delete(provider));
+		this.usageInflight.set(provider, p);
+		return p;
+	}
+
+	private async fetchUsage(provider: string): Promise<UsageInfo> {
+		// On failure, fall back to the last known-good value (even if stale) so a
+		// transient 429/network error never wipes the displayed usage.
+		const stale = (error: string): UsageInfo => {
+			const c = this.usageCache.get(provider);
+			return c ? c.value : { provider, error };
+		};
+		const ok = (value: UsageInfo): UsageInfo => {
+			this.usageCache.set(provider, { ts: Date.now(), value });
+			return value;
+		};
 		try {
 			const apiKey = await this.authStorage.getApiKey(provider);
 			if (!apiKey) return { provider, error: "Not signed in" };
@@ -899,13 +924,13 @@ export class Driver {
 					headers: { Accept: "application/json", Authorization: `Bearer ${apiKey}`, "anthropic-beta": "oauth-2025-04-20" },
 					signal: AbortSignal.timeout(10000),
 				});
-				if (!res.ok) return { provider, error: `HTTP ${res.status}` };
+				if (!res.ok) return stale(`HTTP ${res.status}`);
 				const d: any = await res.json();
-				return {
+				return ok({
 					provider,
 					fiveHour: d.five_hour ? { pct: d.five_hour.utilization, resetsAt: d.five_hour.resets_at } : undefined,
 					sevenDay: d.seven_day ? { pct: d.seven_day.utilization, resetsAt: d.seven_day.resets_at } : undefined,
-				};
+				});
 			}
 			// openai-codex
 			const auth = this.decodeJwt(apiKey)?.["https://api.openai.com/auth"];
@@ -915,17 +940,17 @@ export class Driver {
 				headers: { Accept: "*/*", Authorization: `Bearer ${apiKey}`, "chatgpt-account-id": accountId, originator: "pi" },
 				signal: AbortSignal.timeout(10000),
 			});
-			if (!res.ok) return { provider, error: `HTTP ${res.status}` };
+			if (!res.ok) return stale(`HTTP ${res.status}`);
 			const d: any = await res.json();
 			const p = d.rate_limit?.primary_window;
 			const s = d.rate_limit?.secondary_window;
-			return {
+			return ok({
 				provider,
 				fiveHour: p ? { pct: p.used_percent, resetsAt: p.reset_at ? new Date(p.reset_at * 1000).toISOString() : null } : undefined,
 				sevenDay: s ? { pct: s.used_percent, resetsAt: s.reset_at ? new Date(s.reset_at * 1000).toISOString() : null } : undefined,
-			};
+			});
 		} catch (err) {
-			return { provider, error: err instanceof Error ? err.message : String(err) };
+			return stale(err instanceof Error ? err.message : String(err));
 		}
 	}
 
