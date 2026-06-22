@@ -122,6 +122,8 @@ export function Sidebar({
 	onEditMemory,
 	unread,
 	activeStreamingFile,
+	folderOrder,
+	onReorderFolders,
 	onSettings,
 	onCollapseSidebar,
 }: {
@@ -141,6 +143,8 @@ export function Sidebar({
 	onEditMemory: (cwd: string, name: string) => void;
 	unread: Set<string>;
 	activeStreamingFile?: string;
+	folderOrder: string[];
+	onReorderFolders: (order: string[]) => void;
 	onSettings: () => void;
 	onCollapseSidebar: () => void;
 }) {
@@ -148,6 +152,8 @@ export function Sidebar({
 	const [collapsed, setCollapsed] = useState<Set<string>>(loadCollapsed);
 	const [menu, setMenu] = useState<FolderMenu | null>(null);
 	const [smenu, setSmenu] = useState<SessionMenu | null>(null);
+	const [dragCwd, setDragCwd] = useState<string | null>(null);
+	const [dropCwd, setDropCwd] = useState<string | null>(null);
 
 	useEffect(() => {
 		try {
@@ -179,9 +185,24 @@ export function Sidebar({
 		}
 		const arr = [...map.values()];
 		for (const f of arr) f.sessions.sort((a, b) => b.modified - a.modified);
-		arr.sort((a, b) => b.latest - a.latest);
+		const orderIndex = new Map(folderOrder.map((c, i) => [c, i] as const));
+		arr.sort((a, b) => {
+			const ai = orderIndex.has(a.cwd) ? (orderIndex.get(a.cwd) as number) : Number.MAX_SAFE_INTEGER;
+			const bi = orderIndex.has(b.cwd) ? (orderIndex.get(b.cwd) as number) : Number.MAX_SAFE_INTEGER;
+			if (ai !== bi) return ai - bi;
+			return b.latest - a.latest;
+		});
 		return arr;
-	}, [sessions, q]);
+	}, [sessions, q, folderOrder]);
+
+	const reorder = (target: string) => {
+		if (!dragCwd || dragCwd === target) return;
+		const order = folders.map((f) => f.cwd).filter((c) => c !== dragCwd);
+		const ti = order.indexOf(target);
+		if (ti < 0) return;
+		order.splice(ti, 0, dragCwd);
+		onReorderFolders(order);
+	};
 
 	const searching = q.trim().length > 0;
 	const activeCwd = useMemo(
@@ -252,7 +273,28 @@ export function Sidebar({
 						const open = !isCollapsed(f.cwd);
 						const active = !!streamingCwd && f.cwd === streamingCwd;
 						return (
-							<div className="folder-row" key={`f:${f.cwd}`}>
+							<div
+								className={`folder-row${dropCwd === f.cwd ? " drop-target" : ""}${dragCwd === f.cwd ? " dragging" : ""}`}
+								key={`f:${f.cwd}`}
+								draggable={!searching}
+								onDragStart={() => setDragCwd(f.cwd)}
+								onDragEnd={() => {
+									setDragCwd(null);
+									setDropCwd(null);
+								}}
+								onDragOver={(e) => {
+									if (dragCwd && dragCwd !== f.cwd) {
+										e.preventDefault();
+										if (dropCwd !== f.cwd) setDropCwd(f.cwd);
+									}
+								}}
+								onDrop={(e) => {
+									e.preventDefault();
+									reorder(f.cwd);
+									setDragCwd(null);
+									setDropCwd(null);
+								}}
+							>
 								<button className="folder-head" onClick={() => toggle(f.cwd)} title={f.cwd || "(no folder)"} type="button">
 									<span className="chev">{open ? "▾" : "▸"}</span>
 									<span className="folder-name">{f.name}</span>

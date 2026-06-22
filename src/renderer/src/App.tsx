@@ -342,6 +342,8 @@ export default function App() {
 						onEditMemory={(cwd, name) => setMemory({ cwd, label: name })}
 						unread={unread}
 						activeStreamingFile={state?.isStreaming ? state.sessionFile : undefined}
+						folderOrder={gui.folderOrder}
+						onReorderFolders={async (order) => setGui(await window.pi.setGuiSettings({ folderOrder: order }))}
 						onSettings={() => setSettingsTab("general")}
 						onCollapseSidebar={() => setCollapsed(true)}
 					/>
