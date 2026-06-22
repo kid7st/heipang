@@ -13,6 +13,20 @@ function iconPath(): string | undefined {
 
 let mainWindow: BrowserWindow | null = null;
 
+// Only one HEIPANG at a time. A second launch hands off to the running one
+// (focus it) and quits, so you never get two Dock icons / two GUIs.
+if (!app.requestSingleInstanceLock()) {
+	app.quit();
+} else {
+	app.on("second-instance", () => {
+		if (mainWindow) {
+			if (mainWindow.isMinimized()) mainWindow.restore();
+			mainWindow.show();
+			mainWindow.focus();
+		}
+	});
+}
+
 function createWindow(): void {
 	mainWindow = new BrowserWindow({
 		width: 1280,

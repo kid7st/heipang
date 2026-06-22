@@ -119,8 +119,6 @@ export function BottomBar({
 				))}
 			</select>
 
-			{state?.isStreaming && <span className="streaming-dot">● streaming</span>}
-
 			<div className="spacer" />
 
 			{state?.contextPct != null && (

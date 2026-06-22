@@ -93,9 +93,11 @@ type Row =
 	| { kind: "folder"; folder: Folder }
 	| { kind: "session"; session: SessionListItem };
 
-const LS_KEY = "pi.sidebar.collapsed";
+// Stores which folders are EXPANDED. Default is collapsed, so reopening the app
+// shows a tidy list of folders instead of every conversation spread open.
+const LS_KEY = "pi.sidebar.expanded";
 
-function loadCollapsed(): Set<string> {
+function loadExpanded(): Set<string> {
 	try {
 		const raw = localStorage.getItem(LS_KEY);
 		if (raw) return new Set(JSON.parse(raw));
@@ -149,7 +151,7 @@ export function Sidebar({
 	onCollapseSidebar: () => void;
 }) {
 	const [q, setQ] = useState("");
-	const [collapsed, setCollapsed] = useState<Set<string>>(loadCollapsed);
+	const [expanded, setExpanded] = useState<Set<string>>(loadExpanded);
 	const [menu, setMenu] = useState<FolderMenu | null>(null);
 	const [smenu, setSmenu] = useState<SessionMenu | null>(null);
 	const [dragCwd, setDragCwd] = useState<string | null>(null);
@@ -157,11 +159,11 @@ export function Sidebar({
 
 	useEffect(() => {
 		try {
-			localStorage.setItem(LS_KEY, JSON.stringify([...collapsed]));
+			localStorage.setItem(LS_KEY, JSON.stringify([...expanded]));
 		} catch {
 			/* ignore */
 		}
-	}, [collapsed]);
+	}, [expanded]);
 
 	const folders = useMemo<Folder[]>(() => {
 		const needle = q.trim().toLowerCase();
@@ -210,9 +212,14 @@ export function Sidebar({
 		[sessions, activeFile],
 	);
 
+	// Keep the folder of the conversation you're currently in open.
+	useEffect(() => {
+		if (activeCwd) setExpanded((prev) => (prev.has(activeCwd) ? prev : new Set(prev).add(activeCwd)));
+	}, [activeCwd]);
+
 	const isCollapsed = (cwd: string) => {
 		if (searching) return false; // expand all while searching
-		return collapsed.has(cwd);
+		return !expanded.has(cwd);
 	};
 
 	const rows = useMemo<Row[]>(() => {
@@ -225,7 +232,7 @@ export function Sidebar({
 		}
 		return out;
 		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [folders, collapsed, searching, activeCwd]);
+	}, [folders, expanded, searching, activeCwd]);
 
 	useEffect(() => {
 		if (!menu && !smenu) return;
@@ -242,7 +249,7 @@ export function Sidebar({
 	}, [menu, smenu]);
 
 	const toggle = (cwd: string) => {
-		setCollapsed((prev) => {
+		setExpanded((prev) => {
 			const next = new Set(prev);
 			if (next.has(cwd)) next.delete(cwd);
 			else next.add(cwd);
