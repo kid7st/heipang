@@ -2,6 +2,57 @@ import { useEffect, useState } from "react";
 import type { ActiveState } from "../../../shared/types";
 import { PanelIcon } from "./Sidebar";
 
+function fmtDuration(ms: number): string {
+	const total = Math.max(0, Math.floor(ms / 1000));
+	const h = Math.floor(total / 3600);
+	const m = Math.floor((total % 3600) / 60);
+	const s = total % 60;
+	if (h > 0) return `${h}h ${m}m ${s}s`;
+	if (m > 0) return `${m}m ${s}s`;
+	return `${s}s`;
+}
+
+/**
+ * Live "working time" for the current run. The 1s interval only runs while
+ * streaming and only re-renders this tiny component — idle cost is zero.
+ */
+function WorkTimer({ isStreaming, sessionId }: { isStreaming: boolean; sessionId: string }) {
+	const [startedAt, setStartedAt] = useState<number | null>(null);
+	const [finalMs, setFinalMs] = useState<number | null>(null);
+	const [now, setNow] = useState(0);
+
+	// forget timing when the user switches to another session
+	useEffect(() => {
+		setStartedAt(null);
+		setFinalMs(null);
+	}, [sessionId]);
+
+	useEffect(() => {
+		if (isStreaming) {
+			setStartedAt((prev) => prev ?? Date.now());
+			setFinalMs(null);
+		} else if (startedAt != null) {
+			setFinalMs(Date.now() - startedAt);
+			setStartedAt(null);
+		}
+	}, [isStreaming, startedAt]);
+
+	useEffect(() => {
+		if (!isStreaming) return;
+		setNow(Date.now());
+		const id = setInterval(() => setNow(Date.now()), 1000);
+		return () => clearInterval(id);
+	}, [isStreaming]);
+
+	if (isStreaming && startedAt != null) {
+		return <span className="hb-timer working" title="Time the current run has been working">Working for {fmtDuration(now - startedAt)}</span>;
+	}
+	if (finalMs != null) {
+		return <span className="hb-timer" title="Duration of the last run">Worked for {fmtDuration(finalMs)}</span>;
+	}
+	return null;
+}
+
 export function HeaderBar({
 	state,
 	title,
@@ -75,6 +126,7 @@ export function HeaderBar({
 				)}
 			</div>
 			<div className="hb-actions">
+				<WorkTimer isStreaming={!!state?.isStreaming} sessionId={state?.sessionId ?? ""} />
 				<button
 					className={`btn btn-icon${rightPanelOpen ? " on" : ""}`}
 					onClick={onToggleRightPanel}
