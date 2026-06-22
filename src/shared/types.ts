@@ -172,6 +172,7 @@ export interface GuiSettings {
 	autoExtractTasks: boolean;
 	rightPanelOpen: boolean;
 	workspaceNames: Record<string, string>;
+	folderOrder: string[];
 	sidebarWidth: number;
 	sidebarCollapsed: boolean;
 }
@@ -191,6 +192,7 @@ export interface ActiveState {
 	model?: { provider: string; id: string; name: string };
 	thinkingLevel: ThinkingLevel;
 	isStreaming: boolean;
+	contextPct?: number; // % of the model's context window currently used
 }
 
 export interface OpenSessionResult {

@@ -123,6 +123,11 @@ export function BottomBar({
 
 			<div className="spacer" />
 
+			{state?.contextPct != null && (
+				<span className="ctx-pill" title="How much of this conversation's context window is used. Start a new chat when it gets high.">
+					ctx {state.contextPct}%
+				</span>
+			)}
 			<UsagePill usage={usage} onRefresh={onRefreshUsage} />
 		</div>
 	);

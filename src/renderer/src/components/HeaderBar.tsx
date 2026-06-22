@@ -10,7 +10,6 @@ export function HeaderBar({
 	rightPanelOpen,
 	onExpandSidebar,
 	onToggleRightPanel,
-	onSettings,
 	onRenameActive,
 }: {
 	state: ActiveState | null;
@@ -20,7 +19,6 @@ export function HeaderBar({
 	rightPanelOpen: boolean;
 	onExpandSidebar: () => void;
 	onToggleRightPanel: () => void;
-	onSettings: () => void;
 	onRenameActive: (name: string) => void;
 }) {
 	const [editing, setEditing] = useState(false);
@@ -75,9 +73,6 @@ export function HeaderBar({
 					type="button"
 				>
 					☰
-				</button>
-				<button className="btn btn-icon" onClick={onSettings} title="Settings" type="button">
-					⚙︎
 				</button>
 			</div>
 		</div>

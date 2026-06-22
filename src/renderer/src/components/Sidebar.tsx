@@ -121,6 +121,8 @@ export function Sidebar({
 	onNewInFolder,
 	onEditMemory,
 	unread,
+	activeStreamingFile,
+	onSettings,
 	onCollapseSidebar,
 }: {
 	sessions: SessionListItem[];
@@ -138,6 +140,8 @@ export function Sidebar({
 	onNewInFolder: (cwd: string) => void;
 	onEditMemory: (cwd: string, name: string) => void;
 	unread: Set<string>;
+	activeStreamingFile?: string;
+	onSettings: () => void;
 	onCollapseSidebar: () => void;
 }) {
 	const [q, setQ] = useState("");
@@ -274,7 +278,11 @@ export function Sidebar({
 						<div className={`session-row${s.path === activeFile ? " active" : ""}`} key={`s:${s.path}`}>
 							<button className="session-item" onClick={() => onOpen(s)} type="button">
 								<div className="session-title">
-									{unread.has(s.path) && <span className="unread-dot" title="finished" />}
+									{s.path === activeStreamingFile ? (
+										<span className="spinner sm" title="working" />
+									) : (
+										unread.has(s.path) && <span className="unread-dot" title="finished" />
+									)}
 									{s.name || s.firstMessage || "(empty)"}
 								</div>
 								<div className="session-meta">
@@ -299,6 +307,12 @@ export function Sidebar({
 					);
 				}}
 			</VList>
+
+			<div className="sidebar-footer">
+				<button className="btn btn-icon" onClick={onSettings} title="Settings" type="button">
+					⚙︎
+				</button>
+			</div>
 
 			{menu && (
 				<div className="folder-menu" style={{ top: menu.y + 4, left: Math.max(8, menu.x - 160) }} onClick={(e) => e.stopPropagation()}>

@@ -174,6 +174,29 @@ select {
 	animation: spin 0.7s linear infinite;
 	flex-shrink: 0;
 }
+.spinner.sm {
+	width: 8px;
+	height: 8px;
+	border-width: 2px;
+	display: inline-block;
+	margin-right: 6px;
+	vertical-align: middle;
+}
+.sidebar-footer {
+	display: flex;
+	align-items: center;
+	padding: 6px 12px;
+	border-top: 1px solid var(--border);
+}
+.ctx-pill {
+	font-size: 11px;
+	color: var(--fg-dim);
+	padding: 3px 6px;
+	border-radius: 6px;
+}
+.ctx-pill:hover {
+	background: var(--bg-3);
+}
 @keyframes spin {
 	to {
 		transform: rotate(360deg);

@@ -14,6 +14,7 @@ import { Composer } from "./components/Composer";
 import { HeaderBar } from "./components/HeaderBar";
 import { MemoryEditor } from "./components/MemoryEditor";
 import { MessageList } from "./components/MessageList";
+import { PromptModal, type PromptSpec } from "./components/PromptModal";
 import { RequestDialog, type PendingRequest } from "./components/RequestDialog";
 import { SettingsModal } from "./components/SettingsModal";
 import { Sidebar } from "./components/Sidebar";
@@ -37,6 +38,7 @@ export default function App() {
 		autoExtractTasks: true,
 		rightPanelOpen: true,
 		workspaceNames: {},
+		folderOrder: [],
 		sidebarWidth: 280,
 		sidebarCollapsed: false,
 	});
@@ -47,6 +49,7 @@ export default function App() {
 	const [request, setRequest] = useState<PendingRequest | null>(null);
 	const [unread, setUnread] = useState<Set<string>>(new Set());
 	const [memory, setMemory] = useState<{ cwd?: string; label: string } | null>(null);
+	const [promptSpec, setPromptSpec] = useState<PromptSpec | null>(null);
 	const [toast, setToast] = useState<string | null>(null);
 
 	const activeFileRef = useRef<string | undefined>(undefined);
@@ -214,22 +217,28 @@ export default function App() {
 	);
 	const onOpenFolder = useCallback((cwd: string) => window.pi.openPath(cwd), []);
 	const onRenameFolder = useCallback(
-		async (cwd: string, current: string) => {
-			const name = prompt("Rename this folder (display label only — does not touch the real folder):", current);
-			if (name == null) return;
-			const names = { ...gui.workspaceNames };
-			if (name.trim()) names[cwd] = name.trim();
-			else delete names[cwd];
-			setGui(await window.pi.setGuiSettings({ workspaceNames: names }));
+		(cwd: string, current: string) => {
+			setPromptSpec({
+				title: "Rename folder",
+				label: "Display label only — your real folder on disk is not touched.",
+				value: current,
+				onSubmit: async (name) => {
+					setGui(await window.pi.setGuiSettings({ workspaceNames: { ...gui.workspaceNames, [cwd]: name } }));
+				},
+			});
 		},
 		[gui.workspaceNames],
 	);
 	const onRenameSession = useCallback(
-		async (s: SessionListItem) => {
-			const name = prompt("Rename conversation:", s.name || s.firstMessage || "");
-			if (name == null || !name.trim()) return;
-			await window.pi.renameSession(s.path, name.trim());
-			refreshSessions();
+		(s: SessionListItem) => {
+			setPromptSpec({
+				title: "Rename conversation",
+				value: s.name || s.firstMessage || "",
+				onSubmit: async (name) => {
+					await window.pi.renameSession(s.path, name);
+					refreshSessions();
+				},
+			});
 		},
 		[refreshSessions],
 	);
@@ -332,6 +341,8 @@ export default function App() {
 						onNewInFolder={onNewInFolder}
 						onEditMemory={(cwd, name) => setMemory({ cwd, label: name })}
 						unread={unread}
+						activeStreamingFile={state?.isStreaming ? state.sessionFile : undefined}
+						onSettings={() => setSettingsTab("general")}
 						onCollapseSidebar={() => setCollapsed(true)}
 					/>
 					<div className="resizer" onMouseDown={startResize} />
@@ -346,7 +357,6 @@ export default function App() {
 					rightPanelOpen={gui.rightPanelOpen}
 					onExpandSidebar={() => setCollapsed(false)}
 					onToggleRightPanel={toggleRightPanel}
-					onSettings={() => setSettingsTab("general")}
 					onRenameActive={onRenameActive}
 				/>
 				<div className="conv">
@@ -394,6 +404,7 @@ export default function App() {
 				/>
 			)}
 			{memory && <MemoryEditor cwd={memory.cwd} label={memory.label} onClose={() => setMemory(null)} />}
+			{promptSpec && <PromptModal spec={promptSpec} onClose={() => setPromptSpec(null)} />}
 			{request && <RequestDialog req={request} onClose={() => setRequest(null)} />}
 
 			{toast && (

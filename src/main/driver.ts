@@ -4,6 +4,7 @@ import { basename, dirname, join } from "node:path";
 import {
 	AgentSession,
 	AuthStorage,
+	calculateContextTokens,
 	createAgentSession,
 	DefaultResourceLoader,
 	getAgentDir,
@@ -45,6 +46,7 @@ const DEFAULT_GUI_SETTINGS: GuiSettings = {
 	autoExtractTasks: true,
 	rightPanelOpen: true,
 	workspaceNames: {},
+	folderOrder: [],
 	sidebarWidth: 280,
 	sidebarCollapsed: false,
 };
@@ -445,6 +447,18 @@ export class Driver {
 		return out;
 	}
 
+	private computeContextPct(): number | undefined {
+		if (!this.session?.model?.contextWindow) return undefined;
+		const msgs = this.session.messages as any[];
+		for (let i = msgs.length - 1; i >= 0; i--) {
+			if (msgs[i].role === "assistant" && msgs[i].usage) {
+				const tokens = calculateContextTokens(msgs[i].usage);
+				return Math.min(100, Math.round((tokens / this.session.model.contextWindow) * 100));
+			}
+		}
+		return 0;
+	}
+
 	getActiveState(): ActiveState | null {
 		if (!this.session) return null;
 		const m = this.session.model;
@@ -456,6 +470,7 @@ export class Driver {
 			model: m ? { provider: m.provider, id: m.id, name: m.name } : undefined,
 			thinkingLevel: this.session.thinkingLevel as ThinkingLevel,
 			isStreaming: this.session.isStreaming,
+			contextPct: this.computeContextPct(),
 		};
 	}
 
