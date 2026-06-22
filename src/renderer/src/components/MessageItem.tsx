@@ -33,6 +33,33 @@ function blockText(content: any[]): string {
 		.join("\n\n");
 }
 
+function summarizeArgs(args: any): string {
+	if (!args || typeof args !== "object") return "";
+	if (typeof args.path === "string") return args.path.split("/").pop() || args.path;
+	if (typeof args.file_path === "string") return args.file_path.split("/").pop() || args.file_path;
+	if (typeof args.command === "string") return args.command.replace(/\s+/g, " ").trim().slice(0, 90);
+	if (typeof args.pattern === "string") return args.pattern;
+	if (typeof args.url === "string") return args.url;
+	if (typeof args.query === "string") return args.query;
+	const first = Object.values(args).find((v) => typeof v === "string") as string | undefined;
+	return first ? first.slice(0, 90) : "";
+}
+
+function ToolCall({ name, args }: { name: string; args: any }) {
+	const [open, setOpen] = useState(false);
+	const summary = summarizeArgs(args);
+	return (
+		<div className="tool-line-wrap">
+			<button className="tool-line" onClick={() => setOpen((o) => !o)} type="button">
+				<span className="chev">{open ? "▾" : "▸"}</span>
+				<span className="tool-line-name">{name}</span>
+				{summary && <span className="tool-line-arg">{summary}</span>}
+			</button>
+			{open && <pre className="toolcall-args">{JSON.stringify(args, null, 2)}</pre>}
+		</div>
+	);
+}
+
 export const MessageItem = memo(function MessageItem({ msg }: { msg: UIMessage }) {
 	if (msg.role === "user") {
 		const imgs = Array.isArray(msg.content) ? msg.content.filter((c: any) => c.type === "image") : [];
@@ -70,12 +97,7 @@ export const MessageItem = memo(function MessageItem({ msg }: { msg: UIMessage }
 					</div>
 				)}
 				{tools.map((t) => (
-					<div className="toolcall" key={t.id}>
-						<div className="toolcall-head">
-							<span className="tool-name">{t.name}</span>
-						</div>
-						<pre className="toolcall-args">{JSON.stringify(t.arguments, null, 2)}</pre>
-					</div>
+					<ToolCall key={t.id} name={t.name} args={t.arguments} />
 				))}
 				{msg.errorMessage && <div className="msg-error">{msg.errorMessage}</div>}
 			</div>

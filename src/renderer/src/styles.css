@@ -1156,6 +1156,37 @@ select {
 	white-space: pre-wrap;
 	font-style: italic;
 }
+.tool-line-wrap {
+	margin: 1px 0;
+}
+.tool-line {
+	display: flex;
+	align-items: baseline;
+	gap: 8px;
+	width: 100%;
+	text-align: left;
+	background: transparent;
+	border: none;
+	padding: 3px 0;
+	color: var(--fg-dim);
+	font-size: 12px;
+}
+.tool-line:hover {
+	color: var(--fg);
+}
+.tool-line-name {
+	font-family: var(--mono);
+	color: var(--accent-2);
+	font-weight: 600;
+	flex-shrink: 0;
+}
+.tool-line-arg {
+	font-family: var(--mono);
+	color: var(--fg-faint);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
 .toolcall {
 	background: var(--bg-2);
 	border: 1px solid var(--border);
