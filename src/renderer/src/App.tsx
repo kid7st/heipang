@@ -127,6 +127,35 @@ export default function App() {
 
 	useEffect(() => window.pi.onRequest((req) => setRequest(req)), []);
 
+	// Copy as PLAIN TEXT only (no bubble/code background or other HTML formatting
+	// leaks into the clipboard). Links are kept as readable text + URL.
+	useEffect(() => {
+		const onCopy = (e: ClipboardEvent) => {
+			const sel = window.getSelection();
+			// textarea/input selections aren't in window.getSelection() → leave default
+			if (!sel || sel.rangeCount === 0 || sel.isCollapsed || !e.clipboardData) return;
+			const holder = document.createElement("div");
+			for (let i = 0; i < sel.rangeCount; i++) holder.appendChild(sel.getRangeAt(i).cloneContents());
+			holder.querySelectorAll("a").forEach((a) => {
+				const href = a.getAttribute("href") || "";
+				const text = (a.textContent || "").trim();
+				let rep = text;
+				if (href && /^(https?:|mailto:)/i.test(href) && href !== text) rep = text ? `${text} (${href})` : href;
+				else if (href && !text) rep = href;
+				a.replaceWith(document.createTextNode(rep));
+			});
+			// innerText (vs textContent) preserves visual line breaks; needs to be in the DOM
+			holder.style.cssText = "position:fixed;left:-99999px;top:0;white-space:pre-wrap;";
+			document.body.appendChild(holder);
+			const text = holder.innerText;
+			document.body.removeChild(holder);
+			e.preventDefault();
+			e.clipboardData.setData("text/plain", text); // only plain text, no text/html
+		};
+		document.addEventListener("copy", onCopy, true);
+		return () => document.removeEventListener("copy", onCopy, true);
+	}, []);
+
 	const streaming = !!state?.isStreaming;
 	useEffect(() => {
 		if (!streaming) refreshUsage();
