@@ -38,6 +38,7 @@ export interface OAuthBridge {
 }
 
 const BUILTIN_COMMANDS: CommandInfo[] = [
+	{ name: "usage", description: "Show this account's usage (5h / 7d limits)", source: "builtin" },
 	{ name: "compact", description: "Summarize & compact the conversation to free context", source: "builtin" },
 	{ name: "new", description: "Start a new conversation", source: "builtin" },
 ];

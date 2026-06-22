@@ -128,8 +128,35 @@ export default function App() {
 		if (!streaming) refreshUsage();
 	}, [streaming, refreshUsage]);
 
+	const showUsage = useCallback(async () => {
+		const u = await window.pi.getUsage();
+		setUsage(u);
+		if (u.error) {
+			flash(`Usage: ${u.error}`);
+			return;
+		}
+		const fmt = (b?: { pct: number; resetsAt: string | null }) => {
+			if (!b) return null;
+			const d = b.resetsAt ? new Date(b.resetsAt).getTime() - Date.now() : 0;
+			const h = Math.max(0, Math.floor(d / 3600000));
+			const m = Math.max(0, Math.floor((d % 3600000) / 60000));
+			const reset = b.resetsAt ? ` (resets in ${h >= 24 ? `${Math.floor(h / 24)}d` : h > 0 ? `${h}h${m}m` : `${m}m`})` : "";
+			return `${b.pct.toFixed(0)}%${reset}`;
+		};
+		const parts: string[] = [];
+		if (u.fiveHour) parts.push(`5h ${fmt(u.fiveHour)}`);
+		if (u.sevenDay) parts.push(`7d ${fmt(u.sevenDay)}`);
+		flash(`${u.provider} usage — ${parts.join(" · ") || "no data"}`);
+	}, [flash]);
+
 	const onSend = useCallback(
 		async (text: string, images: { data: string; mimeType: string }[]) => {
+			const cmd = text.trim();
+			// Usage commands are TUI-only in pi; handle them natively in the GUI instead.
+			if (cmd === "/usage" || cmd.startsWith("/usage-widget-status")) {
+				showUsage();
+				return;
+			}
 			const hadSession = !!state;
 			await window.pi.sendMessage(text, images);
 			if (!hadSession) {
@@ -137,7 +164,7 @@ export default function App() {
 				refreshSessions();
 			}
 		},
-		[state, refreshSessions],
+		[state, refreshSessions, showUsage],
 	);
 
 	const loadInto = useCallback(

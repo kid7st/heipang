@@ -21,6 +21,8 @@ export function HeaderBar({
 	onToggleRightPanel: () => void;
 	onRenameActive: (name: string) => void;
 }) {
+	const ctx = state?.contextPct;
+	const ctxColor = ctx == null ? undefined : ctx >= 80 ? "#c0492f" : ctx >= 50 ? "#b8791a" : "#2f9e63";
 	const [editing, setEditing] = useState(false);
 	const [draft, setDraft] = useState(title);
 	useEffect(() => setDraft(title), [title]);
@@ -56,12 +58,19 @@ export function HeaderBar({
 						}}
 					/>
 				) : (
-					<span
-						className={`hb-title${canRename ? " editable" : ""}`}
-						onClick={() => canRename && setEditing(true)}
-						title={canRename ? "Click to rename" : undefined}
-					>
-						{title || "New conversation"}
+					<span className="hb-title-row">
+						<span
+							className={`hb-title${canRename ? " editable" : ""}`}
+							onClick={() => canRename && setEditing(true)}
+							title={canRename ? "Click to rename" : undefined}
+						>
+							{title || "New conversation"}
+						</span>
+						{ctx != null && (
+							<span className="hb-ctx" style={{ color: ctxColor }} title="Context window used in this conversation. Start a new chat when it gets high.">
+								{ctx}%
+							</span>
+						)}
 					</span>
 				)}
 			</div>
