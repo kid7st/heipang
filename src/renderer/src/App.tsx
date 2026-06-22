@@ -48,6 +48,7 @@ export default function App() {
 	const [settingsTab, setSettingsTab] = useState<"general" | "models" | "accounts" | "extensions" | "skills" | null>(null);
 	const [request, setRequest] = useState<PendingRequest | null>(null);
 	const [unread, setUnread] = useState<Set<string>>(new Set());
+	const [bgRunning, setBgRunning] = useState<{ path: string; cwd: string }[]>([]);
 	const [memory, setMemory] = useState<{ cwd?: string; label: string } | null>(null);
 	const [promptSpec, setPromptSpec] = useState<PromptSpec | null>(null);
 	const [toast, setToast] = useState<string | null>(null);
@@ -111,6 +112,9 @@ export default function App() {
 						const p = e.path;
 						setUnread((prev) => new Set(prev).add(p));
 					}
+					break;
+				case "background":
+					setBgRunning(e.sessions);
 					break;
 				case "error":
 					flash(e.message);
@@ -331,7 +335,10 @@ export default function App() {
 		[],
 	);
 
-	const streamingCwd = state?.isStreaming ? state.cwd : undefined;
+	const runningFiles = new Set(bgRunning.map((b) => b.path));
+	if (state?.isStreaming && state.sessionFile) runningFiles.add(state.sessionFile);
+	const runningCwds = new Set(bgRunning.map((b) => b.cwd));
+	if (state?.isStreaming) runningCwds.add(state.cwd);
 	const activeSession = sessions.find((s) => s.path === state?.sessionFile);
 	const title = state?.sessionName || activeSession?.name || activeSession?.firstMessage || "";
 	const folderLabel = state ? gui.workspaceNames[state.cwd] || baseName(state.cwd) : "";
@@ -355,7 +362,7 @@ export default function App() {
 					<Sidebar
 						sessions={sessions}
 						activeFile={state?.sessionFile}
-						streamingCwd={streamingCwd}
+						runningCwds={runningCwds}
 						workspaceNames={gui.workspaceNames}
 						onNew={onNew}
 						onOpen={onOpen}
@@ -368,7 +375,7 @@ export default function App() {
 						onNewInFolder={onNewInFolder}
 						onEditMemory={(cwd, name) => setMemory({ cwd, label: name })}
 						unread={unread}
-						activeStreamingFile={state?.isStreaming ? state.sessionFile : undefined}
+						runningFiles={runningFiles}
 						folderOrder={gui.folderOrder}
 						onReorderFolders={async (order) => setGui(await window.pi.setGuiSettings({ folderOrder: order }))}
 						onSettings={() => setSettingsTab("general")}

@@ -208,6 +208,7 @@ export type StreamEvent =
 	| { type: "state"; state: ActiveState }
 	| { type: "tasks"; tasks: Task[] }
 	| { type: "sessionDone"; path?: string }
+	| { type: "background"; sessions: { path: string; cwd: string }[] } // sessions still running in the background
 	| { type: "error"; message: string };
 
 export interface PiApi {

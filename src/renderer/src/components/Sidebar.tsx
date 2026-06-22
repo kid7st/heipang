@@ -108,7 +108,7 @@ function loadCollapsed(): Set<string> {
 export function Sidebar({
 	sessions,
 	activeFile,
-	streamingCwd,
+	runningCwds,
 	workspaceNames,
 	onNew,
 	onOpen,
@@ -121,7 +121,7 @@ export function Sidebar({
 	onNewInFolder,
 	onEditMemory,
 	unread,
-	activeStreamingFile,
+	runningFiles,
 	folderOrder,
 	onReorderFolders,
 	onSettings,
@@ -129,7 +129,7 @@ export function Sidebar({
 }: {
 	sessions: SessionListItem[];
 	activeFile?: string;
-	streamingCwd?: string;
+	runningCwds: Set<string>;
 	workspaceNames: Record<string, string>;
 	onNew: () => void;
 	onOpen: (s: SessionListItem) => void;
@@ -142,7 +142,7 @@ export function Sidebar({
 	onNewInFolder: (cwd: string) => void;
 	onEditMemory: (cwd: string, name: string) => void;
 	unread: Set<string>;
-	activeStreamingFile?: string;
+	runningFiles: Set<string>;
 	folderOrder: string[];
 	onReorderFolders: (order: string[]) => void;
 	onSettings: () => void;
@@ -271,7 +271,7 @@ export function Sidebar({
 					if (row.kind === "folder") {
 						const f = row.folder;
 						const open = !isCollapsed(f.cwd);
-						const active = !!streamingCwd && f.cwd === streamingCwd;
+						const active = runningCwds.has(f.cwd);
 						return (
 							<div
 								className={`folder-row${dropCwd === f.cwd ? " drop-target" : ""}${dragCwd === f.cwd ? " dragging" : ""}`}
@@ -320,7 +320,7 @@ export function Sidebar({
 						<div className={`session-row${s.path === activeFile ? " active" : ""}`} key={`s:${s.path}`}>
 							<button className="session-item" onClick={() => onOpen(s)} type="button">
 								<div className="session-title">
-									{s.path === activeStreamingFile ? (
+									{runningFiles.has(s.path) ? (
 										<span className="spinner sm" title="working" />
 									) : (
 										unread.has(s.path) && <span className="unread-dot" title="finished" />

@@ -101,6 +101,12 @@ export class Driver {
 	private onTasks?: (tasks: Task[]) => void;
 	private onRunComplete?: (path?: string) => void;
 	private onError?: (message: string) => void;
+	private onBackground?: (sessions: { path: string; cwd: string }[]) => void;
+
+	// Sessions that keep running after the user navigates away (multi-session
+	// parallelism). The SDK persists their messages internally on message_end,
+	// so they finish + save even with no UI attached. Disposed on completion.
+	private bgSessions = new Map<string, { session: AgentSession; unsubscribe: () => void; cwd: string }>();
 
 	constructor() {
 		this.agentDir = getAgentDir();
@@ -124,6 +130,7 @@ export class Driver {
 		onTasks: (tasks: Task[]) => void;
 		onRunComplete: (path?: string) => void;
 		onError: (message: string) => void;
+		onBackground?: (sessions: { path: string; cwd: string }[]) => void;
 	}): void {
 		this.onMessages = handlers.onMessages;
 		this.onMessagesPatch = handlers.onMessagesPatch;
@@ -131,6 +138,7 @@ export class Driver {
 		this.onTasks = handlers.onTasks;
 		this.onRunComplete = handlers.onRunComplete;
 		this.onError = handlers.onError;
+		this.onBackground = handlers.onBackground;
 	}
 
 	// --------------------------------------------------------- resources/settings
@@ -347,11 +355,24 @@ export class Driver {
 		mkdirSync(dirname(dest), { recursive: true });
 		renameSync(path, dest);
 		if (this.session?.sessionFile === path) this.disposeSession();
+		this.killBackground(path);
+	}
+
+	/** Stop + drop a background run (used when its session is deleted/archived). */
+	private killBackground(path: string): void {
+		const entry = this.bgSessions.get(path);
+		if (!entry) return;
+		this.bgSessions.delete(path);
+		entry.unsubscribe();
+		entry.session.abort().catch(() => {});
+		entry.session.dispose();
+		this.emitBackground();
 	}
 
 	async deleteSession(path: string): Promise<void> {
 		if (existsSync(path)) rmSync(path, { force: true });
 		if (this.session?.sessionFile === path) this.disposeSession();
+		this.killBackground(path);
 	}
 
 	/** Delete every session belonging to a workspace (cwd), then prune the empty dir. */
@@ -361,6 +382,7 @@ export class Driver {
 		for (const s of infos) {
 			if (s.cwd === cwd) {
 				if (this.session?.sessionFile === s.path) this.disposeSession();
+				this.killBackground(s.path);
 				if (existsSync(s.path)) {
 					dirs.add(dirname(s.path));
 					rmSync(s.path, { force: true });
@@ -385,6 +407,11 @@ export class Driver {
 		if (this.session?.sessionFile === path) {
 			this.session.setSessionName(trimmed);
 			this.emitState();
+			return;
+		}
+		const bg = this.bgSessions.get(path);
+		if (bg) {
+			bg.session.setSessionName(trimmed);
 			return;
 		}
 		try {
@@ -564,13 +591,79 @@ export class Driver {
 		this.unsubscribe = undefined;
 		this.session?.dispose();
 		this.session = undefined;
+		this.clearSessionUiState();
+	}
+
+	/** Reset the per-session UI bookkeeping WITHOUT touching the session object. */
+	private clearSessionUiState(): void {
 		this.savedTasks = [];
 		this.taskCounter = 0;
 		this.lastExtractUserCount = -1;
 		this.sentUiCount = 0;
 		if (this.extractTimer) clearTimeout(this.extractTimer);
+		this.extractTimer = undefined;
 		if (this.msgFlushTimer) clearTimeout(this.msgFlushTimer);
 		this.msgFlushTimer = undefined;
+	}
+
+	// --------------------------------------------- background (parallel) runs
+
+	private emitBackground(): void {
+		const list = [...this.bgSessions.entries()].map(([path, e]) => ({ path, cwd: e.cwd }));
+		this.onBackground?.(list);
+	}
+
+	/**
+	 * Leaving the current session: if it's mid-run, keep it alive in the
+	 * background (so it finishes + saves); otherwise dispose it.
+	 */
+	private leaveCurrent(): void {
+		if (!this.session) return;
+		const file = this.session.sessionFile;
+		if (this.session.isStreaming && file && !this.bgSessions.has(file)) {
+			const session = this.session;
+			const cwd = this.activeCwd;
+			// drop the UI-coupled subscription; attach a minimal background one
+			this.unsubscribe?.();
+			this.unsubscribe = undefined;
+			const unsub = session.subscribe((event) => {
+				if (event.type === "agent_end") this.finishBackground(file);
+			});
+			this.bgSessions.set(file, { session, unsubscribe: unsub, cwd });
+			this.session = undefined;
+			this.clearSessionUiState();
+			this.emitBackground();
+		} else {
+			this.disposeSession();
+		}
+	}
+
+	/** A background run finished: notify (green dot / desktop ping) and free it. */
+	private finishBackground(file: string): void {
+		const entry = this.bgSessions.get(file);
+		if (!entry) return;
+		this.bgSessions.delete(file);
+		entry.unsubscribe();
+		entry.session.dispose();
+		this.onRunComplete?.(file);
+		this.emitBackground();
+	}
+
+	/** If `path` is running in the background, detach it and make it active. */
+	private reattachBackground(path: string): boolean {
+		const entry = this.bgSessions.get(path);
+		if (!entry) return false;
+		this.bgSessions.delete(path);
+		entry.unsubscribe();
+		this.session = entry.session;
+		this.activeCwd = entry.cwd;
+		this.wireSession();
+		this.loadTasks();
+		this.scheduleAutoExtract();
+		const messages = this.getMessages();
+		this.sentUiCount = messages.length;
+		this.emitBackground();
+		return true;
 	}
 
 	// ----------------------------------------------------------------- tasks
@@ -955,7 +1048,15 @@ export class Driver {
 	}
 
 	async openSession(path: string): Promise<OpenSessionResult> {
-		this.disposeSession();
+		// Returning to a session that's still running in the background: re-attach
+		// to the live run instead of reloading a stale copy from disk.
+		if (this.bgSessions.has(path)) {
+			this.leaveCurrent();
+			if (this.reattachBackground(path)) {
+				return { state: this.getActiveState()!, messages: this.getMessages() };
+			}
+		}
+		this.leaveCurrent();
 		const sessionManager = SessionManager.open(path);
 		const { session, modelFallbackMessage } = await createAgentSession({
 			agentDir: this.agentDir,
@@ -977,7 +1078,7 @@ export class Driver {
 	}
 
 	async newSession(cwd?: string): Promise<OpenSessionResult> {
-		this.disposeSession();
+		this.leaveCurrent();
 		const workdir = cwd && existsSync(cwd) ? cwd : homedir();
 		const { session, modelFallbackMessage } = await createAgentSession({
 			agentDir: this.agentDir,

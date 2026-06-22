@@ -54,6 +54,7 @@ export function registerIpc(driver: Driver, getWindow: () => BrowserWindow | nul
 			}
 		},
 		onError: (message) => send({ type: "error", message }),
+		onBackground: (sessions) => send({ type: "background", sessions }),
 	});
 
 	const h = <T extends unknown[], R>(channel: string, fn: (...args: T) => Promise<R> | R) => {
