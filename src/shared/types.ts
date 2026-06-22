@@ -193,6 +193,8 @@ export interface ActiveState {
 	thinkingLevel: ThinkingLevel;
 	isStreaming: boolean;
 	contextPct?: number; // % of the model's context window currently used
+	runStartedAt?: number; // epoch ms when the current run started (survives leaving/returning)
+	lastRunMs?: number; // duration of the most recent finished run
 }
 
 export interface OpenSessionResult {

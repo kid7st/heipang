@@ -108,6 +108,11 @@ export class Driver {
 	// so they finish + save even with no UI attached. Disposed on completion.
 	private bgSessions = new Map<string, { session: AgentSession; unsubscribe: () => void; cwd: string }>();
 
+	// Per-session run timing (keyed by sessionId), so "working for X" keeps
+	// counting from the real start even after leaving + returning to a session.
+	private runStart = new Map<string, number>();
+	private lastRunMs = new Map<string, number>();
+
 	constructor() {
 		this.agentDir = getAgentDir();
 		const authPath = join(this.agentDir, "auth.json");
@@ -505,7 +510,23 @@ export class Driver {
 			thinkingLevel: this.session.thinkingLevel as ThinkingLevel,
 			isStreaming: this.session.isStreaming,
 			contextPct: this.computeContextPct(),
+			runStartedAt: this.runStart.get(this.session.sessionId),
+			lastRunMs: this.lastRunMs.get(this.session.sessionId),
 		};
+	}
+
+	private markRunStart(session?: AgentSession): void {
+		if (!session) return;
+		if (!this.runStart.has(session.sessionId)) this.runStart.set(session.sessionId, Date.now());
+	}
+
+	private markRunEnd(session?: AgentSession): void {
+		if (!session) return;
+		const start = this.runStart.get(session.sessionId);
+		if (start != null) {
+			this.lastRunMs.set(session.sessionId, Date.now() - start);
+			this.runStart.delete(session.sessionId);
+		}
 	}
 
 	getMessages(): UIMessage[] {
@@ -530,6 +551,7 @@ export class Driver {
 					this.emitState();
 					break;
 				case "agent_end":
+					this.markRunEnd(this.session);
 					this.flushEmit();
 					this.emitState();
 					this.scheduleAutoExtract();
@@ -627,7 +649,10 @@ export class Driver {
 			this.unsubscribe?.();
 			this.unsubscribe = undefined;
 			const unsub = session.subscribe((event) => {
-				if (event.type === "agent_end") this.finishBackground(file);
+				if (event.type === "agent_end") {
+					this.markRunEnd(session);
+					this.finishBackground(file);
+				}
 			});
 			this.bgSessions.set(file, { session, unsubscribe: unsub, cwd });
 			this.session = undefined;
@@ -1109,6 +1134,7 @@ export class Driver {
 		const imgs = images?.length
 			? images.map((i) => ({ type: "image" as const, data: i.data, mimeType: i.mimeType }))
 			: undefined;
+		this.markRunStart(this.session);
 		if (this.session.isStreaming) {
 			await this.session.prompt(text, { streamingBehavior: "followUp", images: imgs });
 		} else {
@@ -1121,6 +1147,7 @@ export class Driver {
 
 	async abort(): Promise<void> {
 		await this.session?.abort();
+		this.markRunEnd(this.session);
 		this.emitState();
 	}
 

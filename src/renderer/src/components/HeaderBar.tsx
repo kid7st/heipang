@@ -13,29 +13,21 @@ function fmtDuration(ms: number): string {
 }
 
 /**
- * Live "working time" for the current run. The 1s interval only runs while
- * streaming and only re-renders this tiny component — idle cost is zero.
+ * Live "working time" for the current run. The real start timestamp comes from
+ * the main process, so it keeps counting continuously even after you leave and
+ * return to a still-running session. The 1s interval only runs while streaming
+ * and only re-renders this tiny component — idle cost is zero.
  */
-function WorkTimer({ isStreaming, sessionId }: { isStreaming: boolean; sessionId: string }) {
-	const [startedAt, setStartedAt] = useState<number | null>(null);
-	const [finalMs, setFinalMs] = useState<number | null>(null);
+function WorkTimer({
+	isStreaming,
+	runStartedAt,
+	lastRunMs,
+}: {
+	isStreaming: boolean;
+	runStartedAt?: number;
+	lastRunMs?: number;
+}) {
 	const [now, setNow] = useState(0);
-
-	// forget timing when the user switches to another session
-	useEffect(() => {
-		setStartedAt(null);
-		setFinalMs(null);
-	}, [sessionId]);
-
-	useEffect(() => {
-		if (isStreaming) {
-			setStartedAt((prev) => prev ?? Date.now());
-			setFinalMs(null);
-		} else if (startedAt != null) {
-			setFinalMs(Date.now() - startedAt);
-			setStartedAt(null);
-		}
-	}, [isStreaming, startedAt]);
 
 	useEffect(() => {
 		if (!isStreaming) return;
@@ -44,11 +36,11 @@ function WorkTimer({ isStreaming, sessionId }: { isStreaming: boolean; sessionId
 		return () => clearInterval(id);
 	}, [isStreaming]);
 
-	if (isStreaming && startedAt != null) {
-		return <span className="hb-timer working" title="Time the current run has been working">Working for {fmtDuration(now - startedAt)}</span>;
+	if (isStreaming && runStartedAt != null) {
+		return <span className="hb-timer working" title="Time the current run has been working">Working for {fmtDuration(now - runStartedAt)}</span>;
 	}
-	if (finalMs != null) {
-		return <span className="hb-timer" title="Duration of the last run">Worked for {fmtDuration(finalMs)}</span>;
+	if (!isStreaming && lastRunMs != null) {
+		return <span className="hb-timer" title="Duration of the last run">Worked for {fmtDuration(lastRunMs)}</span>;
 	}
 	return null;
 }
@@ -126,7 +118,7 @@ export function HeaderBar({
 				)}
 			</div>
 			<div className="hb-actions">
-				<WorkTimer isStreaming={!!state?.isStreaming} sessionId={state?.sessionId ?? ""} />
+				<WorkTimer isStreaming={!!state?.isStreaming} runStartedAt={state?.runStartedAt} lastRunMs={state?.lastRunMs} />
 				<button
 					className={`btn btn-icon${rightPanelOpen ? " on" : ""}`}
 					onClick={onToggleRightPanel}
