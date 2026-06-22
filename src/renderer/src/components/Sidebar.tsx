@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { VList } from "virtua";
 import type { SessionListItem } from "../../../shared/types";
+import { ChevronDownIcon, ChevronRightIcon, DotsIcon } from "./icons";
 
 function Svg({ children }: { children: React.ReactNode }) {
 	return (
@@ -157,14 +158,6 @@ export function Sidebar({
 	const [dragCwd, setDragCwd] = useState<string | null>(null);
 	const [dropCwd, setDropCwd] = useState<string | null>(null);
 
-	useEffect(() => {
-		try {
-			localStorage.setItem(LS_KEY, JSON.stringify([...expanded]));
-		} catch {
-			/* ignore */
-		}
-	}, [expanded]);
-
 	const folders = useMemo<Folder[]>(() => {
 		const needle = q.trim().toLowerCase();
 		const map = new Map<string, Folder>();
@@ -248,11 +241,18 @@ export function Sidebar({
 		};
 	}, [menu, smenu]);
 
+	// Only MANUAL toggles are persisted, so reopening the app stays tidy even after
+	// you've visited many folders (auto-expanding the active one isn't remembered).
 	const toggle = (cwd: string) => {
 		setExpanded((prev) => {
 			const next = new Set(prev);
 			if (next.has(cwd)) next.delete(cwd);
 			else next.add(cwd);
+			try {
+				localStorage.setItem(LS_KEY, JSON.stringify([...next]));
+			} catch {
+				/* ignore */
+			}
 			return next;
 		});
 	};
@@ -303,7 +303,7 @@ export function Sidebar({
 								}}
 							>
 								<button className="folder-head" onClick={() => toggle(f.cwd)} title={f.cwd || "(no folder)"} type="button">
-									<span className="chev">{open ? "▾" : "▸"}</span>
+									<span className="chev">{open ? <ChevronDownIcon size={13} /> : <ChevronRightIcon size={13} />}</span>
 									<span className="folder-name">{f.name}</span>
 									{active && <span className="spinner" title="task running" />}
 								</button>
@@ -317,7 +317,7 @@ export function Sidebar({
 									}}
 									type="button"
 								>
-									⋯
+									<DotsIcon />
 								</button>
 							</div>
 						);
@@ -349,7 +349,7 @@ export function Sidebar({
 									}}
 									type="button"
 								>
-									⋯
+									<DotsIcon />
 								</button>
 							</div>
 						</div>

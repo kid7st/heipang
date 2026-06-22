@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import type { ActiveState, ModelsPayload, Task, ThinkingLevel, UsageInfo } from "../../../shared/types";
 import { BottomBar } from "./BottomBar";
+import { ChevronRightIcon, CloseIcon, RefreshIcon } from "./icons";
 
 function TaskRow({ task, onUpdate, onDelete }: { task: Task; onUpdate: (t: Task) => void; onDelete: (id: string) => void }) {
 	const [editing, setEditing] = useState(false);
@@ -52,7 +53,7 @@ function TaskRow({ task, onUpdate, onDelete }: { task: Task; onUpdate: (t: Task)
 				</span>
 			)}
 			<button className="task-del" title="Remove" onClick={() => onDelete(task.id)} type="button">
-				✕
+				<CloseIcon size={12} />
 			</button>
 		</div>
 	);
@@ -92,15 +93,15 @@ export function TaskPanel({
 			<div className="taskpanel-head">
 				<span className="taskpanel-title">Tasks</span>
 				<button className="btn btn-icon" onClick={onExtract} disabled={extracting} title="Re-summarize from the conversation" type="button">
-					{extracting ? <span className="spinner" /> : "⟳"}
+					{extracting ? <span className="spinner" /> : <RefreshIcon />}
 				</button>
 				<button className="btn btn-icon" onClick={onClose} title="Hide" type="button">
-					⟩
+					<ChevronRightIcon />
 				</button>
 			</div>
 
 			<div className="task-list">
-				{active.length === 0 && <div className="task-empty">No active tasks.{"\n"}Hit ⟳ to summarize the conversation.</div>}
+				{active.length === 0 && <div className="task-empty">No active tasks.{"\n"}Hit refresh to summarize the conversation.</div>}
 				{active.map((t) => (
 					<TaskRow key={t.id} task={t} onUpdate={onUpdate} onDelete={onDelete} />
 				))}

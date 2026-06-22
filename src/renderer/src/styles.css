@@ -238,6 +238,18 @@ select {
 	font-size: 12px;
 	padding: 2px 5px;
 	opacity: 0.55;
+	display: inline-flex;
+	align-items: center;
+	color: var(--fg-dim);
+}
+.chev {
+	display: inline-flex;
+	align-items: center;
+	color: var(--fg-faint);
+}
+.task-del {
+	display: inline-flex;
+	align-items: center;
 }
 .row-action:hover {
 	opacity: 1;

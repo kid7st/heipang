@@ -1,5 +1,6 @@
 import { memo, useState } from "react";
 import type { UIMessage } from "../../../shared/types";
+import { ChevronDownIcon, ChevronRightIcon } from "./icons";
 import { Markdown } from "./Markdown";
 
 function userText(content: UIMessage extends { role: "user" } ? never : any): string {
@@ -18,7 +19,7 @@ function Collapsible({ title, children, defaultOpen = false }: { title: string; 
 	return (
 		<div className="collapsible">
 			<button className="collapsible-head" onClick={() => setOpen((o) => !o)} type="button">
-				<span className="chev">{open ? "▾" : "▸"}</span>
+				<span className="chev">{open ? <ChevronDownIcon size={12} /> : <ChevronRightIcon size={12} />}</span>
 				{title}
 			</button>
 			{open && <div className="collapsible-body">{children}</div>}
@@ -51,7 +52,7 @@ function ToolCall({ name, args }: { name: string; args: any }) {
 	return (
 		<div className="tool-line-wrap">
 			<button className="tool-line" onClick={() => setOpen((o) => !o)} type="button">
-				<span className="chev">{open ? "▾" : "▸"}</span>
+				<span className="chev">{open ? <ChevronDownIcon size={12} /> : <ChevronRightIcon size={12} />}</span>
 				<span className="tool-line-name">{name}</span>
 				{summary && <span className="tool-line-arg">{summary}</span>}
 			</button>

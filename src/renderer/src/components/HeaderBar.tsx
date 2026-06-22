@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type { ActiveState } from "../../../shared/types";
+import { ListIcon } from "./icons";
 import { PanelIcon } from "./Sidebar";
 
 function fmtDuration(ms: number): string {
@@ -125,7 +126,7 @@ export function HeaderBar({
 					title="Toggle tasks panel"
 					type="button"
 				>
-					☰
+					<ListIcon />
 				</button>
 			</div>
 		</div>
