@@ -1,0 +1,176 @@
+import { useState } from "react";
+import type { ModelsPayload, NewModelInput, RemoteModel } from "../../../shared/types";
+
+/** Embeddable model management (rendered inside Settings → Models). */
+export function ModelManager({
+	models,
+	onChanged,
+}: {
+	models: ModelsPayload;
+	onChanged: (next: ModelsPayload) => void;
+}) {
+	const [remote, setRemote] = useState<RemoteModel[] | null>(null);
+	const [remoteSel, setRemoteSel] = useState<Set<string>>(new Set());
+	const [busy, setBusy] = useState(false);
+	const [err, setErr] = useState<string | null>(null);
+	const [showAdd, setShowAdd] = useState(false);
+
+	const [mId, setMId] = useState("");
+	const [mName, setMName] = useState("");
+	const [mProvider, setMProvider] = useState("anthropic");
+
+	const enabledSet = new Set(models.enabled);
+	const defKey = models.defaultProvider && models.defaultModel ? `${models.defaultProvider}/${models.defaultModel}` : "";
+
+	// Active = the models actually offered in the dropdown (enabled set).
+	const active = models.all.filter((m) => enabledSet.has(`${m.provider}/${m.id}`));
+
+	const fetchRemote = async () => {
+		setBusy(true);
+		setErr(null);
+		const res = await window.pi.fetchRemoteModels();
+		setBusy(false);
+		if (!res.ok) {
+			setErr(res.error || "Failed to fetch models");
+			return;
+		}
+		setRemote(res.models || []);
+		setRemoteSel(new Set());
+	};
+
+	const addAndEnable = async (inputs: NewModelInput[]) => {
+		await window.pi.addModels(inputs);
+		const keys = inputs.map((i) => `${i.provider}/${i.id}`);
+		const next = await window.pi.setEnabledModels([...new Set([...models.enabled, ...keys])]);
+		onChanged(next);
+		return next;
+	};
+
+	const addSelectedRemote = async () => {
+		if (!remote) return;
+		const picks = remote.filter((m) => remoteSel.has(m.id));
+		if (picks.length === 0) return;
+		setBusy(true);
+		await addAndEnable(
+			picks.map((m) => ({ provider: "anthropic", id: m.id, name: m.display_name || m.id, reasoning: true, contextWindow: 1000000, maxTokens: 128000 })),
+		);
+		setBusy(false);
+		setRemote((r) => r?.map((x) => (remoteSel.has(x.id) ? { ...x, alreadyAdded: true } : x)) ?? null);
+		setRemoteSel(new Set());
+	};
+
+	const addManual = async () => {
+		if (!mId.trim()) return;
+		setBusy(true);
+		const codex = mProvider === "openai-codex";
+		await addAndEnable([
+			{
+				provider: mProvider,
+				id: mId.trim(),
+				name: mName.trim() || mId.trim(),
+				reasoning: true,
+				contextWindow: codex ? 272000 : 1000000,
+				maxTokens: 128000,
+			},
+		]);
+		setBusy(false);
+		setMId("");
+		setMName("");
+		setShowAdd(false);
+	};
+
+	const setDefault = async (provider: string, id: string) => onChanged(await window.pi.setDefaultModel(provider, id));
+
+	const removeActive = async (key: string) => {
+		const next = await window.pi.setEnabledModels(models.enabled.filter((e) => e !== key));
+		onChanged(next);
+	};
+
+	return (
+		<div className="models-tab">
+			{err && <div className="modal-error">{err}</div>}
+
+			<div className="section-title">Active models (shown in the chat dropdown)</div>
+			<div className="card-grid">
+				{active.length === 0 && <div className="setting-note">No active models. Add one below.</div>}
+				{active.map((m) => {
+					const key = `${m.provider}/${m.id}`;
+					return (
+						<div className="card model-card" key={key}>
+							<div className="model-card-top">
+								<span className="model-name">{m.name}</span>
+								<button className={`star${defKey === key ? " on" : ""}`} onClick={() => setDefault(m.provider, m.id)} title="Set as default" type="button">
+									★
+								</button>
+							</div>
+							<div className="model-id">{key}</div>
+							{!m.hasAuth && <span className="badge noauth">no auth</span>}
+							<button className="btn btn-sm" onClick={() => removeActive(key)} type="button">
+								Remove
+							</button>
+						</div>
+					);
+				})}
+			</div>
+
+			<div className="section-title" style={{ marginTop: 18 }}>
+				Add models
+				<button className="btn btn-sm" onClick={fetchRemote} disabled={busy} type="button">
+					{busy ? "…" : "Fetch from Anthropic"}
+				</button>
+				<button className="btn btn-sm" onClick={() => setShowAdd((s) => !s)} type="button">
+					{showAdd ? "Cancel" : "Add by ID"}
+				</button>
+			</div>
+
+			{showAdd && (
+				<div className="manual-form">
+					<select value={mProvider} onChange={(e) => setMProvider(e.target.value)}>
+						<option value="anthropic">Claude (anthropic)</option>
+						<option value="openai-codex">ChatGPT (openai-codex)</option>
+					</select>
+					<input
+						placeholder={mProvider === "openai-codex" ? "model id (e.g. gpt-6)" : "model id (e.g. claude-opus-4-9)"}
+						value={mId}
+						onChange={(e) => setMId(e.target.value)}
+					/>
+					<input placeholder="display name (optional)" value={mName} onChange={(e) => setMName(e.target.value)} />
+					<button className="btn btn-send" onClick={addManual} disabled={busy || !mId.trim()} type="button">
+						Add
+					</button>
+				</div>
+			)}
+
+			{remote && (
+				<>
+					<div className="model-table scroll">
+						{remote.map((m) => (
+							<label className="model-row remote" key={m.id}>
+								<input
+									type="checkbox"
+									disabled={m.alreadyAdded}
+									checked={remoteSel.has(m.id)}
+									onChange={() => {
+										setRemoteSel((s) => {
+											const n = new Set(s);
+											if (n.has(m.id)) n.delete(m.id);
+											else n.add(m.id);
+											return n;
+										});
+									}}
+								/>
+								<span className="model-name">{m.display_name}</span>
+								<span className="model-id">{m.id}</span>
+								{m.created_at && <span className="model-date">{m.created_at.slice(0, 10)}</span>}
+								{m.alreadyAdded && <span className="badge added">added</span>}
+							</label>
+						))}
+					</div>
+					<button className="btn btn-send" onClick={addSelectedRemote} disabled={busy || remoteSel.size === 0} type="button">
+						Add selected ({remoteSel.size})
+					</button>
+				</>
+			)}
+		</div>
+	);
+}
