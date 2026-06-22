@@ -18,6 +18,7 @@ export function MessageList({ messages, streaming }: { messages: UIMessage[]; st
 		return (
 			<div className="empty-conv">
 				<div className="empty-title">Vibe, Engage, Deliver</div>
+				<div className="empty-sub">就 是 干</div>
 			</div>
 		);
 	}

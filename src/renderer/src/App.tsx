@@ -437,6 +437,7 @@ export default function App() {
 					onStop={() => window.pi.abort()}
 					streaming={!!state?.isStreaming}
 					disabled={convLoading}
+					sessionKey={state?.sessionFile ?? state?.sessionId ?? "new"}
 				/>
 			</div>
 

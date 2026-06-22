@@ -762,9 +762,13 @@ export class Driver {
 
 	private pickExtractionModel(): Model<any> | undefined {
 		const avail = this.modelRegistry.getAvailable();
-		const haiku = avail.find((m) => m.provider === "anthropic" && m.id.includes("haiku"));
+		const haikus = avail.filter((m) => m.provider === "anthropic" && m.id.includes("haiku"));
+		// Prefer a CURRENT haiku (4.x). The old claude-3-5-haiku-* is end-of-life and
+		// silently returns empty content, which made task extraction produce nothing.
+		const haiku =
+			haikus.find((m) => /haiku-4/.test(m.id)) || haikus.find((m) => m.id === "claude-3-5-haiku-latest");
 		if (haiku) return haiku;
-		if (this.session?.model) return this.session.model;
+		if (this.session?.model) return this.session.model; // fall back to the active model (works fine)
 		return avail[0];
 	}
 

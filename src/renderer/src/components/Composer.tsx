@@ -34,15 +34,30 @@ export function Composer({
 	onStop,
 	streaming,
 	disabled,
+	sessionKey,
 }: {
 	commands: CommandInfo[];
 	onSend: (text: string, images: ImageAttachment[]) => void;
 	onStop: () => void;
 	streaming: boolean;
 	disabled: boolean;
+	sessionKey: string;
 }) {
 	const [text, setText] = useState("");
 	const [atts, setAtts] = useState<Attachment[]>([]);
+
+	// Per-session drafts: switching sessions must not carry unsent text/images
+	// across. Each session keeps its own draft; returning restores it.
+	const draftsRef = useRef<Record<string, { text: string; atts: Attachment[] }>>({});
+	const prevKeyRef = useRef(sessionKey);
+	useEffect(() => {
+		if (prevKeyRef.current === sessionKey) return;
+		draftsRef.current[prevKeyRef.current] = { text, atts };
+		const d = draftsRef.current[sessionKey] ?? { text: "", atts: [] };
+		setText(d.text);
+		setAtts(d.atts);
+		prevKeyRef.current = sessionKey;
+	}, [sessionKey, text, atts]);
 	const [paletteIdx, setPaletteIdx] = useState(0);
 	const taRef = useRef<HTMLTextAreaElement>(null);
 	const fileRef = useRef<HTMLInputElement>(null);
