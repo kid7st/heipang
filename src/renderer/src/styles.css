@@ -1222,6 +1222,15 @@ select {
 .tool-line:hover {
 	color: var(--fg);
 }
+.tool-line.is-error .tool-line-name {
+	color: var(--danger);
+}
+.toolcall-detail {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	margin: 2px 0 6px;
+}
 .tool-line-name {
 	font-family: var(--mono);
 	color: var(--accent-2);

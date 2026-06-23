@@ -1,11 +1,26 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { VList, type VListHandle } from "virtua";
-import type { UIMessage } from "../../../shared/types";
+import type { UIMessage, UIToolResultMessage } from "../../../shared/types";
 import { MessageItem } from "./MessageItem";
 
 export function MessageList({ messages, streaming }: { messages: UIMessage[]; streaming: boolean }) {
 	const ref = useRef<VListHandle>(null);
 	const stickRef = useRef(true);
+
+	// Pair each tool result with its call so a tool shows as ONE collapsible line
+	// (args + output together), instead of a separate "bash" result row.
+	const results = useMemo(() => {
+		const m = new Map<string, UIToolResultMessage>();
+		for (const x of messages) if (x.role === "toolResult") m.set(x.toolCallId, x);
+		return m;
+	}, [messages]);
+	const items = useMemo(() => {
+		const out: { m: UIMessage; i: number }[] = [];
+		messages.forEach((m, i) => {
+			if (m.role !== "toolResult") out.push({ m, i });
+		});
+		return out;
+	}, [messages]);
 
 	// Auto-stick to bottom while streaming or when already at bottom.
 	useEffect(() => {
@@ -27,7 +42,7 @@ export function MessageList({ messages, streaming }: { messages: UIMessage[]; st
 		<VList
 			ref={ref}
 			className="msg-list"
-			data={messages}
+			data={items}
 			onScroll={() => {
 				const el = ref.current;
 				if (!el) return;
@@ -35,7 +50,7 @@ export function MessageList({ messages, streaming }: { messages: UIMessage[]; st
 				stickRef.current = dist < 80;
 			}}
 		>
-			{(msg, i) => <MessageItem key={i} msg={msg} />}
+			{(it) => <MessageItem key={it.i} msg={it.m} results={results} />}
 		</VList>
 	);
 }

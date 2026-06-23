@@ -1,5 +1,5 @@
 import { memo, useState } from "react";
-import type { UIMessage } from "../../../shared/types";
+import type { UIMessage, UIToolResultMessage } from "../../../shared/types";
 import { ChevronDownIcon, ChevronRightIcon } from "./icons";
 import { Markdown } from "./Markdown";
 
@@ -46,22 +46,40 @@ function summarizeArgs(args: any): string {
 	return first ? first.slice(0, 90) : "";
 }
 
-function ToolCall({ name, args }: { name: string; args: any }) {
+function ToolCall({ name, args, result }: { name: string; args: any; result?: UIToolResultMessage }) {
 	const [open, setOpen] = useState(false);
 	const summary = summarizeArgs(args);
+	const output = result
+		? result.content
+				.filter((c: any) => c.type === "text")
+				.map((c: any) => c.text)
+				.join("\n")
+		: null;
+	const isErr = !!result?.isError;
 	return (
 		<div className="tool-line-wrap">
-			<button className="tool-line" onClick={() => setOpen((o) => !o)} type="button">
+			<button className={`tool-line${isErr ? " is-error" : ""}`} onClick={() => setOpen((o) => !o)} type="button">
 				<span className="chev">{open ? <ChevronDownIcon size={12} /> : <ChevronRightIcon size={12} />}</span>
 				<span className="tool-line-name">{name}</span>
 				{summary && <span className="tool-line-arg">{summary}</span>}
 			</button>
-			{open && <pre className="toolcall-args">{JSON.stringify(args, null, 2)}</pre>}
+			{open && (
+				<div className="toolcall-detail">
+					<pre className="toolcall-args">{JSON.stringify(args, null, 2)}</pre>
+					{output != null && <pre className="tool-output">{output || "(no output)"}</pre>}
+				</div>
+			)}
 		</div>
 	);
 }
 
-export const MessageItem = memo(function MessageItem({ msg }: { msg: UIMessage }) {
+export const MessageItem = memo(function MessageItem({
+	msg,
+	results,
+}: {
+	msg: UIMessage;
+	results?: Map<string, UIToolResultMessage>;
+}) {
 	if (msg.role === "user") {
 		const imgs = Array.isArray(msg.content) ? msg.content.filter((c: any) => c.type === "image") : [];
 		const txt = userText(msg.content);
@@ -98,7 +116,7 @@ export const MessageItem = memo(function MessageItem({ msg }: { msg: UIMessage }
 					</div>
 				)}
 				{tools.map((t) => (
-					<ToolCall key={t.id} name={t.name} args={t.arguments} />
+					<ToolCall key={t.id} name={t.name} args={t.arguments} result={results?.get(t.id)} />
 				))}
 				{msg.errorMessage && <div className="msg-error">{msg.errorMessage}</div>}
 			</div>
