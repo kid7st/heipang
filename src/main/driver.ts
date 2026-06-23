@@ -780,6 +780,7 @@ export class Driver {
 	async extractTasks(force = true): Promise<{ ok: boolean; tasks?: Task[]; error?: string }> {
 		if (!this.session) return { ok: false, error: "No active session" };
 		if (this.extracting) return { ok: true, tasks: this.getTasks() };
+		const sid = this.session.sessionId;
 		const msgs = this.session.messages as any[];
 		// Token guard: auto-runs only when a NEW user turn appeared since last extraction.
 		const userCount = msgs.filter((m) => m.role === "user").length;
@@ -824,6 +825,9 @@ export class Driver {
 				{ apiKey: auth.apiKey, headers: auth.headers, maxTokens: 1024 },
 			);
 			const text = (result.content ?? []).filter((c: any) => c.type === "text").map((c: any) => c.text).join("");
+			// Bail out if the user switched sessions while we were summarizing, so we
+			// never write/show one session's tasks under another.
+			if (!this.session || this.session.sessionId !== sid) return { ok: false, error: "session changed" };
 			this.lastExtractUserCount = userCount;
 			const titles = this.parseTaskTitles(text);
 			if (titles.length === 0) return { ok: true, tasks: this.getTasks() };
