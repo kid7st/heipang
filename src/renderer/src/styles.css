@@ -566,7 +566,10 @@ select {
 	cursor: default;
 }
 .icon-btn.stop {
-	background: var(--danger);
+	background: #155e3a;
+}
+.icon-btn.stop:hover {
+	background: #0f4a2d;
 }
 .modelbar {
 	display: flex;
