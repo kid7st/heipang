@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { CloseIcon } from "./icons";
 
 export function MemoryEditor({
 	cwd,
@@ -32,7 +33,7 @@ export function MemoryEditor({
 				<div className="modal-head">
 					<h2>Memory · {label}</h2>
 					<button className="btn btn-icon" onClick={onClose} type="button">
-						✕
+						<CloseIcon />
 					</button>
 				</div>
 				<div className="memory-sub">
@@ -47,7 +48,7 @@ export function MemoryEditor({
 					onChange={(e) => setText(e.target.value)}
 				/>
 				<div className="memory-actions">
-					{saved && <span className="memory-saved">Saved ✓</span>}
+					{saved && <span className="memory-saved">Saved</span>}
 					<button className="btn btn-send" onClick={save} disabled={!loaded} type="button">
 						Save
 					</button>

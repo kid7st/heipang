@@ -17,7 +17,7 @@ function resetLabel(iso: string | null | undefined): string {
 function UsagePill({ usage, onRefresh }: { usage: UsageInfo | null; onRefresh: () => void }) {
 	const [open, setOpen] = useState(false);
 	const pct = usage?.fiveHour?.pct;
-	const label = !usage ? "usage" : usage.error ? "usage ⚠" : `5h ${pct != null ? `${pct.toFixed(0)}%` : "—"}`;
+	const label = !usage ? "usage" : usage.error ? "usage —" : `5h ${pct != null ? `${pct.toFixed(0)}%` : "—"}`;
 	return (
 		<div className="usage-pill-wrap">
 			<button

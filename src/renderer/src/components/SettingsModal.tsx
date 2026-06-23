@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type { AccountInfo, GuiSettings, ModelsPayload, PiSettings, ResourcesPayload, ThinkingLevel } from "../../../shared/types";
+import { CloseIcon } from "./icons";
 import { ModelManager } from "./ModelManager";
 
 type Tab = "general" | "models" | "accounts" | "extensions" | "skills";
@@ -16,7 +17,7 @@ function ContentViewer({ title, path, onClose }: { title: string; path: string; 
 				<div className="modal-head">
 					<h2>{title}</h2>
 					<button className="btn btn-icon" onClick={onClose} type="button">
-						✕
+						<CloseIcon />
 					</button>
 				</div>
 				<pre className="viewer-content">{content}</pre>
@@ -89,7 +90,7 @@ export function SettingsModal({
 				<div className="modal-head">
 					<h2>Settings</h2>
 					<button className="btn btn-icon" onClick={onClose} type="button">
-						✕
+						<CloseIcon />
 					</button>
 				</div>
 
@@ -164,7 +165,10 @@ export function SettingsModal({
 							<div className="card account-card" key={a.id}>
 								<div className="account-top">
 									<span className="account-name">{a.name}</span>
-									<span className={`account-status${a.connected ? " on" : ""}`}>{a.connected ? "● connected" : "○ not signed in"}</span>
+									<span className={`account-status${a.connected ? " on" : ""}`}>
+										<span className="status-dot" />
+										{a.connected ? "connected" : "not signed in"}
+									</span>
 								</div>
 								<div className="account-id">{a.id}</div>
 								{a.connected ? (

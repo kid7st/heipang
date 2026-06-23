@@ -1034,6 +1034,10 @@ export class Driver {
 			const c = this.usageCache.get(provider);
 			return c ? c.value : { provider, error };
 		};
+		// Friendly text for the common case: the usage endpoint is rate-limited
+		// (often because another pi/terminal is also polling it).
+		const httpError = (status: number) =>
+			status === 429 ? "rate limited — try again in a bit" : `HTTP ${status}`;
 		const ok = (value: UsageInfo): UsageInfo => {
 			this.usageCache.set(provider, { ts: Date.now(), value });
 			return value;
@@ -1046,7 +1050,7 @@ export class Driver {
 					headers: { Accept: "application/json", Authorization: `Bearer ${apiKey}`, "anthropic-beta": "oauth-2025-04-20" },
 					signal: AbortSignal.timeout(10000),
 				});
-				if (!res.ok) return stale(`HTTP ${res.status}`);
+				if (!res.ok) return stale(httpError(res.status));
 				const d: any = await res.json();
 				return ok({
 					provider,
@@ -1062,7 +1066,7 @@ export class Driver {
 				headers: { Accept: "*/*", Authorization: `Bearer ${apiKey}`, "chatgpt-account-id": accountId, originator: "pi" },
 				signal: AbortSignal.timeout(10000),
 			});
-			if (!res.ok) return stale(`HTTP ${res.status}`);
+			if (!res.ok) return stale(httpError(res.status));
 			const d: any = await res.json();
 			const p = d.rate_limit?.primary_window;
 			const s = d.rate_limit?.secondary_window;

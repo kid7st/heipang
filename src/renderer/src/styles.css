@@ -999,9 +999,23 @@ select {
 .account-status {
 	font-size: 11px;
 	color: var(--fg-faint);
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+}
+.account-status .status-dot {
+	width: 7px;
+	height: 7px;
+	border-radius: 50%;
+	border: 1.5px solid currentColor;
+	background: transparent;
+	flex-shrink: 0;
 }
 .account-status.on {
 	color: var(--green);
+}
+.account-status.on .status-dot {
+	background: var(--green);
 }
 .account-id {
 	font-family: var(--mono);
