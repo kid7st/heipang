@@ -11,7 +11,7 @@ import type { UpdateCheck } from "../shared/types.js";
 const RELEASE_FEED_BASE = "https://raw.githubusercontent.com/kuaai/heipang-releases/main";
 
 function latestUrl(): string {
-	return app.getName() === "SI-YOU-XIN-REN" ? `${RELEASE_FEED_BASE}/si-latest.json` : `${RELEASE_FEED_BASE}/latest.json`;
+	return app.getName() === "SI-YOU-XIN-REN" ? `${RELEASE_FEED_BASE}/si-latest.json` : `${RELEASE_FEED_BASE}/heipang-latest.json`;
 }
 
 interface RemoteLatest {
