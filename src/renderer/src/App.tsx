@@ -40,9 +40,11 @@ export default function App() {
 		workspaceNames: {},
 		folderOrder: [],
 		sidebarWidth: 280,
+		rightPanelWidth: 320,
 		sidebarCollapsed: false,
 	});
 	const [sbWidth, setSbWidth] = useState(280);
+	const [rightWidth, setRightWidth] = useState(320);
 	const [convLoading, setConvLoading] = useState(false);
 	const [extracting, setExtracting] = useState(false);
 	const [settingsTab, setSettingsTab] = useState<"general" | "models" | "accounts" | "extensions" | "skills" | null>(null);
@@ -85,6 +87,7 @@ export default function App() {
 			setMessages(msgs);
 			setGui(g);
 			setSbWidth(g.sidebarWidth);
+			setRightWidth(g.rightPanelWidth ?? 320);
 			setTasks(t);
 			setCommands(cmds);
 		})();
@@ -364,6 +367,28 @@ export default function App() {
 		[],
 	);
 
+	// right (tasks) panel resize
+	const draggingR = useRef(false);
+	const startRightResize = useCallback((e: React.MouseEvent) => {
+		e.preventDefault();
+		draggingR.current = true;
+		const onMove = (ev: MouseEvent) => {
+			if (!draggingR.current) return;
+			setRightWidth(Math.min(600, Math.max(240, window.innerWidth - ev.clientX)));
+		};
+		const onUp = () => {
+			draggingR.current = false;
+			window.removeEventListener("mousemove", onMove);
+			window.removeEventListener("mouseup", onUp);
+			setRightWidth((w) => {
+				window.pi.setGuiSettings({ rightPanelWidth: w }).then(setGui);
+				return w;
+			});
+		};
+		window.addEventListener("mousemove", onMove);
+		window.addEventListener("mouseup", onUp);
+	}, []);
+
 	const runningFiles = new Set(bgRunning.map((b) => b.path));
 	if (state?.isStreaming && state.sessionFile) runningFiles.add(state.sessionFile);
 	const runningCwds = new Set(bgRunning.map((b) => b.cwd));
@@ -372,9 +397,8 @@ export default function App() {
 	const title = state?.sessionName || activeSession?.name || activeSession?.firstMessage || "";
 	const folderLabel = state ? gui.workspaceNames[state.cwd] || baseName(state.cwd) : "";
 
-	const cols = gui.sidebarCollapsed
-		? `1fr${gui.rightPanelOpen ? " 320px" : ""}`
-		: `${sbWidth}px 6px 1fr${gui.rightPanelOpen ? " 320px" : ""}`;
+	const rightCol = gui.rightPanelOpen ? ` ${rightWidth}px` : "";
+	const cols = gui.sidebarCollapsed ? `1fr${rightCol}` : `${sbWidth}px 1fr${rightCol}`;
 
 	const onNewInFolder = useCallback(
 		async (cwd: string) => {
@@ -387,9 +411,8 @@ export default function App() {
 	return (
 		<div className="app" style={{ gridTemplateColumns: cols }}>
 			{!gui.sidebarCollapsed && (
-				<>
-					<Sidebar
-						sessions={sessions}
+				<Sidebar
+					sessions={sessions}
 						activeFile={state?.sessionFile}
 						runningCwds={runningCwds}
 						workspaceNames={gui.workspaceNames}
@@ -410,8 +433,9 @@ export default function App() {
 						onSettings={() => setSettingsTab("general")}
 						onCollapseSidebar={() => setCollapsed(true)}
 					/>
-					<div className="resizer" onMouseDown={startResize} />
-				</>
+			)}
+			{!gui.sidebarCollapsed && (
+				<div className="resizer" style={{ left: sbWidth - 4 }} onMouseDown={startResize} />
 			)}
 			<div className="main">
 				<HeaderBar
@@ -456,6 +480,9 @@ export default function App() {
 					onSetThinking={onSetThinking}
 					onRefreshUsage={refreshUsage}
 				/>
+			)}
+			{gui.rightPanelOpen && (
+				<div className="resizer" style={{ right: rightWidth - 4 }} onMouseDown={startRightResize} />
 			)}
 
 			{settingsTab && (

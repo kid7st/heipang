@@ -174,6 +174,7 @@ export interface GuiSettings {
 	workspaceNames: Record<string, string>;
 	folderOrder: string[];
 	sidebarWidth: number;
+	rightPanelWidth: number;
 	sidebarCollapsed: boolean;
 }
 

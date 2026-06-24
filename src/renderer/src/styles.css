@@ -48,6 +48,7 @@ select {
 	grid-template-columns: 280px 1fr;
 	height: 100%;
 	overflow: hidden;
+	position: relative;
 }
 .app.with-right {
 	grid-template-columns: 280px 1fr 320px;
@@ -329,14 +330,28 @@ select {
 	max-width: 110px;
 }
 
-/* ---------------- resizer ---------------- */
+/* ---------------- resizer (overlay handle on the seam, no layout gap) ------ */
 .resizer {
+	position: absolute;
+	top: 0;
+	bottom: 0;
+	width: 8px;
 	cursor: col-resize;
 	background: transparent;
-	position: relative;
+	z-index: 5;
 }
-.resizer:hover,
-.resizer:active {
+.resizer::after {
+	content: "";
+	position: absolute;
+	left: 3px;
+	top: 0;
+	bottom: 0;
+	width: 2px;
+	background: transparent;
+	transition: background 0.12s ease;
+}
+.resizer:hover::after,
+.resizer:active::after {
 	background: var(--accent-soft-2);
 }
 
@@ -750,10 +765,9 @@ select {
 .task-row:hover .task-del {
 	opacity: 0.6;
 }
-.task-row.checking {
-	opacity: 0;
-	transform: translateX(6px);
-	transition: opacity 0.22s ease, transform 0.22s ease;
+.task-row.done .task-title {
+	text-decoration: line-through;
+	color: var(--fg-faint);
 }
 .task-check {
 	flex-shrink: 0;

@@ -6,21 +6,18 @@ import { ChevronRightIcon, CloseIcon, RefreshIcon } from "./icons";
 function TaskRow({ task, onUpdate, onDelete }: { task: Task; onUpdate: (t: Task) => void; onDelete: (id: string) => void }) {
 	const [editing, setEditing] = useState(false);
 	const [title, setTitle] = useState(task.title);
-	const [checked, setChecked] = useState(false);
+	const done = task.status === "done";
 
-	// Click the circle = done. Show the check briefly, then it disappears.
-	const complete = () => {
-		if (checked) return;
-		setChecked(true);
-		setTimeout(() => onUpdate({ ...task, status: "done" }), 250);
-	};
+	// Click the circle = toggle done. It stays in the list (checked + struck through);
+	// use the ✕ on the right to actually remove it.
+	const toggle = () => onUpdate({ ...task, status: done ? "open" : "done" });
 
 	return (
-		<div className={`task-row${checked ? " checking" : ""}`}>
+		<div className={`task-row${done ? " done" : ""}`}>
 			<button
-				className={`task-check${checked ? " checked" : ""}`}
-				onClick={complete}
-				title="Mark done"
+				className={`task-check${done ? " checked" : ""}`}
+				onClick={toggle}
+				title={done ? "Mark not done" : "Mark done"}
 				type="button"
 			>
 				<svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="true">
@@ -86,7 +83,10 @@ export function TaskPanel({
 	onSetThinking: (level: ThinkingLevel) => void;
 	onRefreshUsage: () => void;
 }) {
-	const active = useMemo(() => tasks.filter((t) => t.status === "open" || t.status === "in_progress"), [tasks]);
+	const active = useMemo(
+		() => tasks.filter((t) => t.status === "open" || t.status === "in_progress" || t.status === "done"),
+		[tasks],
+	);
 
 	return (
 		<div className="taskpanel">

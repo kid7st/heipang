@@ -50,6 +50,7 @@ const DEFAULT_GUI_SETTINGS: GuiSettings = {
 	workspaceNames: {},
 	folderOrder: [],
 	sidebarWidth: 280,
+	rightPanelWidth: 320,
 	sidebarCollapsed: false,
 };
 
