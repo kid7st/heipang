@@ -75,7 +75,7 @@ select {
 	border-radius: 8px;
 	padding: 7px 12px;
 	font-size: 13px;
-	transition: background 0.12s, border-color 0.12s;
+	transition: background 0.12s, border-color 0.12s, color 0.12s;
 }
 .btn:hover {
 	background: var(--bg-3);
@@ -101,10 +101,18 @@ select {
 	display: inline-flex;
 	align-items: center;
 	justify-content: center;
+	border-color: transparent;
+	background: transparent;
 	color: var(--fg-dim);
+	box-shadow: none;
 }
 .btn-icon:hover {
+	background: rgba(57, 111, 84, 0.08);
+	border-color: transparent;
 	color: var(--fg);
+}
+.btn-icon:active {
+	background: rgba(57, 111, 84, 0.13);
 }
 .sidebar-search {
 	margin: 4px 12px 8px;
@@ -558,15 +566,16 @@ select {
 	width: 40px;
 	height: 40px;
 	border-radius: 50%;
-	border: 1px solid var(--border);
-	background: #fff;
+	border: 1px solid transparent;
+	background: transparent;
 	color: var(--fg-dim);
 	display: flex;
 	align-items: center;
 	justify-content: center;
+	transition: background 0.12s, color 0.12s;
 }
 .attach-btn:hover {
-	background: var(--bg-3);
+	background: rgba(57, 111, 84, 0.08);
 	color: var(--fg);
 }
 .msg-images {
@@ -715,7 +724,8 @@ select {
 	color: var(--danger);
 }
 .btn-icon.on {
-	border-color: var(--accent);
+	border-color: transparent;
+	background: var(--accent-soft);
 	color: var(--accent);
 }
 
