@@ -6,9 +6,13 @@ import { dirname, join } from "node:path";
 import type { UpdateCheck } from "../shared/types.js";
 
 // Public release feed. Source code stays in the private repo; only installers
-// + this small JSON live in the public `heipang-releases` repo, so the app can
-// fetch updates anonymously (no embedded token).
-const LATEST_URL = "https://raw.githubusercontent.com/kuaai/heipang-releases/main/latest.json";
+// + these small JSON files live in the public `heipang-releases` repo, so the
+// app can fetch updates anonymously (no embedded token).
+const RELEASE_FEED_BASE = "https://raw.githubusercontent.com/kuaai/heipang-releases/main";
+
+function latestUrl(): string {
+	return app.getName() === "SI-YOU-XIN-REN" ? `${RELEASE_FEED_BASE}/si-latest.json` : `${RELEASE_FEED_BASE}/latest.json`;
+}
 
 interface RemoteLatest {
 	version: string;
@@ -50,7 +54,7 @@ function fetchText(url: string): Promise<string> {
 export async function checkForUpdate(): Promise<UpdateCheck> {
 	const current = app.getVersion();
 	try {
-		const data = JSON.parse(await fetchText(`${LATEST_URL}?t=${Date.now()}`)) as RemoteLatest;
+		const data = JSON.parse(await fetchText(`${latestUrl()}?t=${Date.now()}`)) as RemoteLatest;
 		const latest = String(data.version || "");
 		const url = process.platform === "darwin" ? data.mac : data.win;
 		const hasUpdate = !!latest && cmpVer(latest, current) > 0 && !!url;
@@ -99,10 +103,10 @@ export async function downloadAndInstall(url: string, emit: Emit): Promise<void>
 	try {
 		emit("download", 0);
 		if (process.platform === "darwin") {
-			const dmg = join(dir, "HEIPANG-update.dmg");
+			const dmg = join(dir, `${app.getName()}-update.dmg`);
 			await download(url, dmg, (p) => emit("download", p));
 			emit("install");
-			// /Applications/HEIPANG.app/Contents/MacOS/HEIPANG -> /Applications/HEIPANG.app
+			// /Applications/AppName.app/Contents/MacOS/AppName -> /Applications/AppName.app
 			const appPath = `${process.execPath.split(".app/")[0]}.app`;
 			const script = join(dir, "install.sh");
 			writeFileSync(
@@ -112,7 +116,7 @@ DMG=${JSON.stringify(dmg)}
 APP=${JSON.stringify(appPath)}
 sleep 1
 for i in $(seq 1 40); do
-  pgrep -f "HEIPANG.app/Contents/MacOS/HEIPANG" >/dev/null || break
+  pgrep -f "$APP/Contents/MacOS/" >/dev/null || break
   sleep 1
 done
 MNT="$(mktemp -d)"
