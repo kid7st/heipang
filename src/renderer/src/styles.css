@@ -894,6 +894,19 @@ select {
 	font-size: 12px;
 	margin-top: 14px;
 }
+.upd-bar {
+	margin-top: 6px;
+	height: 5px;
+	border-radius: 999px;
+	background: var(--border);
+	overflow: hidden;
+}
+.upd-bar-fill {
+	height: 100%;
+	border-radius: 999px;
+	background: #155e3a;
+	transition: width 0.15s ease;
+}
 .res-row {
 	padding: 9px 0;
 	border-bottom: 1px solid var(--border);

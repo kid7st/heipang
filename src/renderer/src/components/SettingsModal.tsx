@@ -1,7 +1,100 @@
 import { useEffect, useState } from "react";
-import type { AccountInfo, GuiSettings, ModelsPayload, PiSettings, ResourcesPayload, ThinkingLevel } from "../../../shared/types";
+import type {
+	AccountInfo,
+	GuiSettings,
+	ModelsPayload,
+	PiSettings,
+	ResourcesPayload,
+	ThinkingLevel,
+	UpdateCheck,
+} from "../../../shared/types";
 import { CloseIcon } from "./icons";
 import { ModelManager } from "./ModelManager";
+
+type UpdState =
+	| { kind: "idle" }
+	| { kind: "checking" }
+	| { kind: "checked"; res: UpdateCheck }
+	| { kind: "downloading"; version: string; pct: number }
+	| { kind: "installing"; version: string };
+
+function UpdateCard() {
+	const [version, setVersion] = useState("");
+	const [st, setSt] = useState<UpdState>({ kind: "idle" });
+
+	useEffect(() => {
+		window.pi.getVersion().then(setVersion);
+		const off = window.pi.onEvent((e) => {
+			if (e.type !== "updateProgress") return;
+			if (e.phase === "download") setSt((s) => (s.kind === "downloading" ? { ...s, pct: e.pct ?? s.pct } : s));
+			else if (e.phase === "install" || e.phase === "relaunch")
+				setSt((s) => (s.kind === "downloading" ? { kind: "installing", version: s.version } : s));
+			else if (e.phase === "error")
+				setSt({ kind: "checked", res: { current: version, hasUpdate: false, error: e.message } });
+		});
+		return off;
+	}, [version]);
+
+	const check = async () => {
+		setSt({ kind: "checking" });
+		setSt({ kind: "checked", res: await window.pi.checkForUpdate() });
+	};
+	const install = (res: UpdateCheck) => {
+		if (!res.url || !res.latest) return;
+		setSt({ kind: "downloading", version: res.latest, pct: 0 });
+		window.pi.installUpdate(res.url);
+	};
+
+	return (
+		<div className="card">
+			<div className="card-label">Software update</div>
+			<div className="setting-note" style={{ margin: "0 0 8px" }}>Current version {version || "…"}</div>
+
+			{st.kind === "downloading" && (
+				<div className="setting-note" style={{ margin: 0 }}>
+					Downloading {st.version}… {st.pct}%
+					<div className="upd-bar">
+						<div className="upd-bar-fill" style={{ width: `${st.pct}%` }} />
+					</div>
+				</div>
+			)}
+			{st.kind === "installing" && (
+				<div className="setting-note" style={{ margin: 0 }}>Installing {st.version}, restarting…</div>
+			)}
+
+			{st.kind === "checked" && st.res.error && (
+				<div className="setting-note" style={{ margin: "0 0 8px", color: "#b23a2e" }}>
+					Check failed: {st.res.error}
+				</div>
+			)}
+			{st.kind === "checked" && !st.res.error && !st.res.hasUpdate && (
+				<div className="setting-note" style={{ margin: "0 0 8px" }}>You're on the latest version.</div>
+			)}
+			{st.kind === "checked" && st.res.hasUpdate && (
+				<div className="setting-note" style={{ margin: "0 0 8px", color: "#155e3a" }}>
+					Update available · {st.res.latest}
+					{st.res.notes ? ` — ${st.res.notes}` : ""}
+				</div>
+			)}
+
+			{st.kind === "checked" && st.res.hasUpdate ? (
+				<button className="btn btn-sm" style={{ marginLeft: 0 }} onClick={() => install(st.res)} type="button">
+					Download &amp; install
+				</button>
+			) : (
+				<button
+					className="btn btn-sm"
+					style={{ marginLeft: 0 }}
+					onClick={check}
+					disabled={st.kind === "checking" || st.kind === "downloading" || st.kind === "installing"}
+					type="button"
+				>
+					{st.kind === "checking" ? "Checking…" : "Check for update"}
+				</button>
+			)}
+		</div>
+	);
+}
 
 type Tab = "general" | "models" | "accounts" | "extensions" | "skills";
 const THINKING: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh"];
@@ -149,6 +242,7 @@ export function SettingsModal({
 								Edit global memory
 							</button>
 						</div>
+						<UpdateCard />
 					</div>
 				)}
 

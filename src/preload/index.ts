@@ -54,6 +54,10 @@ const api: PiApi = {
 	getActiveState: () => ipcRenderer.invoke("pi:getActiveState"),
 	getMessages: () => ipcRenderer.invoke("pi:getMessages"),
 
+	getVersion: () => ipcRenderer.invoke("pi:getVersion"),
+	checkForUpdate: () => ipcRenderer.invoke("pi:checkForUpdate"),
+	installUpdate: (url) => ipcRenderer.invoke("pi:installUpdate", url),
+
 	pickDirectory: () => ipcRenderer.invoke("pi:pickDirectory"),
 	getHome: () => ipcRenderer.invoke("pi:getHome"),
 

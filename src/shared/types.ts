@@ -178,6 +178,15 @@ export interface GuiSettings {
 	sidebarCollapsed: boolean;
 }
 
+export interface UpdateCheck {
+	current: string; // installed version
+	latest?: string; // remote version
+	hasUpdate: boolean;
+	notes?: string;
+	url?: string; // platform installer url
+	error?: string;
+}
+
 export interface UsageInfo {
 	provider?: string;
 	fiveHour?: { pct: number; resetsAt: string | null };
@@ -212,6 +221,7 @@ export type StreamEvent =
 	| { type: "tasks"; tasks: Task[] }
 	| { type: "sessionDone"; path?: string }
 	| { type: "background"; sessions: { path: string; cwd: string }[] } // sessions still running in the background
+	| { type: "updateProgress"; phase: "download" | "install" | "relaunch" | "error"; pct?: number; message?: string }
 	| { type: "error"; message: string };
 
 export interface PiApi {
@@ -266,6 +276,10 @@ export interface PiApi {
 	getGuiSettings(): Promise<GuiSettings>;
 	setGuiSettings(partial: Partial<GuiSettings>): Promise<GuiSettings>;
 	openPath(path: string): Promise<void>;
+	// updates
+	getVersion(): Promise<string>;
+	checkForUpdate(): Promise<UpdateCheck>;
+	installUpdate(url: string): Promise<void>;
 	// misc
 	pickDirectory(): Promise<string | undefined>;
 	getHome(): Promise<string>;

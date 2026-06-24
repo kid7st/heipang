@@ -1,6 +1,6 @@
 {
   "name": "heipang",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "HEIPANG — fast, model-agnostic desktop GUI for pi",
   "main": "./out/main/index.js",
   "author": "elylyly",
@@ -64,7 +64,8 @@
       "gatekeeperAssess": false
     },
     "dmg": {
-      "writeUpdateInfo": false
+      "writeUpdateInfo": false,
+      "artifactName": "${productName}-${arch}.${ext}"
     },
     "win": {
       "target": "nsis",
@@ -72,7 +73,8 @@
     },
     "nsis": {
       "oneClick": false,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": true,
+      "artifactName": "${productName}-Setup.${ext}"
     }
   }
 }

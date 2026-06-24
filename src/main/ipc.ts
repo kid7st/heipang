@@ -1,8 +1,9 @@
-import { dialog, ipcMain, Notification, shell, type BrowserWindow } from "electron";
+import { app, dialog, ipcMain, Notification, shell, type BrowserWindow } from "electron";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Driver } from "./driver.js";
 import type { StreamEvent, Task } from "../shared/types.js";
+import { checkForUpdate, downloadAndInstall } from "./updater.js";
 
 /**
  * Registers IPC handlers and forwards driver events to the renderer.
@@ -114,6 +115,13 @@ export function registerIpc(driver: Driver, getWindow: () => BrowserWindow | nul
 	h("pi:setThinkingLevel", (level: any) => driver.setThinkingLevel(level));
 	h("pi:getActiveState", () => driver.getActiveState());
 	h("pi:getMessages", () => driver.getMessages());
+
+	// updates
+	h("pi:getVersion", () => app.getVersion());
+	h("pi:checkForUpdate", () => checkForUpdate());
+	h("pi:installUpdate", (url: string) =>
+		downloadAndInstall(url, (phase, pct, message) => send({ type: "updateProgress", phase, pct, message })),
+	);
 
 	// misc
 	h("pi:getHome", () => homedir());
