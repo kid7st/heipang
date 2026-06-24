@@ -14,9 +14,13 @@ export interface ThinkingContent {
 	redacted?: boolean;
 }
 export interface ImageContent {
+	// Kept as "image" for compatibility with pi's current attachment channel.
+	// application/pdf is also carried here and patched into Anthropic's document
+	// block by scripts/patch-pi-pdf.mjs.
 	type: "image";
 	data: string;
 	mimeType: string;
+	name?: string;
 }
 export interface ToolCallContent {
 	type: "toolCall";
@@ -63,6 +67,7 @@ export interface UIUsage {
 export interface ImageAttachment {
 	data: string; // raw base64, no data: prefix
 	mimeType: string;
+	name?: string;
 }
 
 export interface ModelInfo {
@@ -202,6 +207,8 @@ export interface ActiveState {
 	model?: { provider: string; id: string; name: string };
 	thinkingLevel: ThinkingLevel;
 	isStreaming: boolean;
+	isRetrying?: boolean;
+	retryAttempt?: number;
 	contextPct?: number; // % of the model's context window currently used
 	runStartedAt?: number; // epoch ms when the current run started (survives leaving/returning)
 	lastRunMs?: number; // duration of the most recent finished run

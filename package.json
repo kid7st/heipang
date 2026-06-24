@@ -6,15 +6,17 @@
   "author": "elylyly",
   "type": "module",
   "scripts": {
-    "dev": "electron-vite dev",
-    "build": "electron-vite build",
+    "patch:pi-pdf": "node scripts/patch-pi-pdf.mjs",
+    "postinstall": "npm run patch:pi-pdf",
+    "dev": "npm run patch:pi-pdf && electron-vite dev",
+    "build": "npm run patch:pi-pdf && electron-vite build",
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json",
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
-    "start": "electron-vite preview",
-    "pack:mac": "electron-vite build && electron-builder --mac --universal",
-    "pack:mac:dir": "electron-vite build && electron-builder --mac --arm64 --dir",
-    "pack:win": "electron-vite build && electron-builder --win --x64"
+    "start": "npm run patch:pi-pdf && electron-vite preview",
+    "pack:mac": "npm run patch:pi-pdf && electron-vite build && electron-builder --mac --arm64",
+    "pack:mac:dir": "npm run patch:pi-pdf && electron-vite build && electron-builder --mac --arm64 --dir",
+    "pack:win": "npm run patch:pi-pdf && electron-vite build && electron-builder --win --x64"
   },
   "dependencies": {
     "@mariozechner/pi-agent-core": "^0.73.1",

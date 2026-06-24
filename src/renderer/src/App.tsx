@@ -186,7 +186,7 @@ export default function App() {
 	}, [flash]);
 
 	const onSend = useCallback(
-		async (text: string, images: { data: string; mimeType: string }[]) => {
+		async (text: string, images: { data: string; mimeType: string; name?: string }[]) => {
 			const cmd = text.trim();
 			// Usage commands are TUI-only in pi; handle them natively in the GUI instead.
 			if (cmd === "/usage" || cmd.startsWith("/usage-widget-status")) {

@@ -114,6 +114,14 @@ export class Driver {
 	private runStart = new Map<string, number>();
 	private lastRunMs = new Map<string, number>();
 
+	// The SDK has auto-retry, but some provider stream failures (notably Anthropic
+	// "terminated") can still surface as a final assistant error with no visible
+	// retry. Keep a GUI-level fallback that continues from the same user turn.
+	private guiRetryAttempt = new Map<string, number>();
+	private guiRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+	private static readonly GUI_RETRY_MAX = 3;
+	private static readonly GUI_RETRY_BASE_DELAY_MS = 2500;
+
 	constructor() {
 		this.agentDir = getAgentDir();
 		const authPath = join(this.agentDir, "auth.json");
@@ -502,6 +510,10 @@ export class Driver {
 	getActiveState(): ActiveState | null {
 		if (!this.session) return null;
 		const m = this.session.model;
+		const sdkRetrying = !!(this.session as any).isRetrying;
+		const sdkRetryAttempt = Number((this.session as any).retryAttempt ?? 0);
+		const guiRetrying = this.guiRetryTimers.has(this.session.sessionId);
+		const guiRetryAttempt = this.guiRetryAttempt.get(this.session.sessionId) ?? 0;
 		return {
 			sessionId: this.session.sessionId,
 			sessionFile: this.session.sessionFile,
@@ -510,6 +522,8 @@ export class Driver {
 			model: m ? { provider: m.provider, id: m.id, name: m.name } : undefined,
 			thinkingLevel: this.session.thinkingLevel as ThinkingLevel,
 			isStreaming: this.session.isStreaming,
+			isRetrying: sdkRetrying || guiRetrying,
+			retryAttempt: Math.max(sdkRetryAttempt, guiRetryAttempt) || undefined,
 			contextPct: this.computeContextPct(),
 			runStartedAt: this.runStart.get(this.session.sessionId),
 			lastRunMs: this.lastRunMs.get(this.session.sessionId),
@@ -530,6 +544,67 @@ export class Driver {
 		}
 	}
 
+	private clearGuiRetry(sessionId: string): void {
+		const timer = this.guiRetryTimers.get(sessionId);
+		if (timer) clearTimeout(timer);
+		this.guiRetryTimers.delete(sessionId);
+		this.guiRetryAttempt.delete(sessionId);
+	}
+
+	private lastAssistant(messages: any[]): any | undefined {
+		for (let i = messages.length - 1; i >= 0; i--) {
+			if (messages[i]?.role === "assistant") return messages[i];
+		}
+		return undefined;
+	}
+
+	private isRetryableAssistantError(message: any): boolean {
+		if (!message || message.stopReason !== "error" || !message.errorMessage) return false;
+		return /overloaded|provider.?returned.?error|rate.?limit|too many requests|429|500|502|503|504|service.?unavailable|server.?error|internal.?error|network.?error|connection.?error|connection.?refused|connection.?lost|websocket.?closed|websocket.?error|other side closed|fetch failed|upstream.?connect|reset before headers|socket hang up|ended without|http2 request did not get a response|timed? out|timeout|terminated|retry delay/i.test(String(message.errorMessage));
+	}
+
+	private scheduleGuiRetry(session: AgentSession): void {
+		const sessionId = session.sessionId;
+		if (this.guiRetryTimers.has(sessionId)) return;
+		const last = this.lastAssistant(session.messages as any[]);
+		if (!this.isRetryableAssistantError(last)) {
+			this.guiRetryAttempt.delete(sessionId);
+			return;
+		}
+		const attempt = (this.guiRetryAttempt.get(sessionId) ?? 0) + 1;
+		if (attempt > Driver.GUI_RETRY_MAX) {
+			this.clearGuiRetry(sessionId);
+			return;
+		}
+		this.guiRetryAttempt.set(sessionId, attempt);
+		const delayMs = Driver.GUI_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1);
+		const timer = setTimeout(() => {
+			this.guiRetryTimers.delete(sessionId);
+			// Give the SDK's built-in retry a chance first. If it has started, don't duplicate it.
+			if ((session as any).isRetrying || session.isStreaming) {
+				this.emitState();
+				return;
+			}
+			const stateMessages = (session.agent.state.messages ?? []) as any[];
+			const stateLast = stateMessages[stateMessages.length - 1];
+			if (!this.isRetryableAssistantError(stateLast)) {
+				this.emitState();
+				return;
+			}
+			// Remove the failed assistant turn from in-memory context and continue from
+			// the same user message. The failed message remains in jsonl history.
+			session.agent.state.messages = stateMessages.slice(0, -1);
+			this.markRunStart(session);
+			this.emitState();
+			session.agent.continue().catch((err: unknown) => {
+				this.onError?.(err instanceof Error ? err.message : String(err));
+			});
+		}, delayMs);
+		this.guiRetryTimers.set(sessionId, timer);
+		this.onError?.(`Retrying after ${last.errorMessage} (${attempt}/${Driver.GUI_RETRY_MAX})`);
+		this.emitState();
+	}
+
 	getMessages(): UIMessage[] {
 		if (!this.session) return [];
 		return this.toUIMessages(this.session.messages);
@@ -548,16 +623,24 @@ export class Driver {
 					this.emitState();
 					break;
 				case "message_end":
+					if ((event as any).message?.role === "assistant" && (event as any).message?.stopReason !== "error" && this.session) {
+						this.clearGuiRetry(this.session.sessionId);
+					}
 					this.flushEmit();
 					this.emitState();
 					break;
-				case "agent_end":
+				case "agent_end": {
 					this.markRunEnd(this.session);
 					this.flushEmit();
+					if (this.session) this.scheduleGuiRetry(this.session);
+					const retryPending = !!this.session && (this.guiRetryTimers.has(this.session.sessionId) || !!(this.session as any).isRetrying);
 					this.emitState();
-					this.scheduleAutoExtract();
-					this.onRunComplete?.(this.session?.sessionFile);
+					if (!retryPending) {
+						this.scheduleAutoExtract();
+						this.onRunComplete?.(this.session?.sessionFile);
+					}
 					break;
+				}
 				case "auto_retry_start":
 					this.onError?.(`Auto-retry: ${event.errorMessage}`);
 					this.emitState();
@@ -612,6 +695,7 @@ export class Driver {
 	private disposeSession(): void {
 		this.unsubscribe?.();
 		this.unsubscribe = undefined;
+		if (this.session) this.clearGuiRetry(this.session.sessionId);
 		this.session?.dispose();
 		this.session = undefined;
 		this.clearSessionUiState();
@@ -1141,11 +1225,12 @@ export class Driver {
 
 	// ------------------------------------------------------------- messaging
 
-	async sendMessage(text: string, images?: { data: string; mimeType: string }[]): Promise<void> {
+	async sendMessage(text: string, images?: { data: string; mimeType: string; name?: string }[]): Promise<void> {
 		await this.ensureSession();
 		if (!this.session) throw new Error("No active session");
+		this.clearGuiRetry(this.session.sessionId);
 		const imgs = images?.length
-			? images.map((i) => ({ type: "image" as const, data: i.data, mimeType: i.mimeType }))
+			? images.map((i) => ({ type: "image" as const, data: i.data, mimeType: i.mimeType, name: i.name }))
 			: undefined;
 		this.markRunStart(this.session);
 		if (this.session.isStreaming) {
@@ -1159,6 +1244,7 @@ export class Driver {
 	}
 
 	async abort(): Promise<void> {
+		if (this.session) this.clearGuiRetry(this.session.sessionId);
 		await this.session?.abort();
 		this.markRunEnd(this.session);
 		this.emitState();

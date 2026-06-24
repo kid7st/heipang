@@ -81,15 +81,20 @@ export const MessageItem = memo(function MessageItem({
 	results?: Map<string, UIToolResultMessage>;
 }) {
 	if (msg.role === "user") {
-		const imgs = Array.isArray(msg.content) ? msg.content.filter((c: any) => c.type === "image") : [];
+		const attachments = Array.isArray(msg.content) ? msg.content.filter((c: any) => c.type === "image") : [];
+		const imgs = attachments.filter((c: any) => c.mimeType !== "application/pdf");
+		const pdfs = attachments.filter((c: any) => c.mimeType === "application/pdf");
 		const txt = userText(msg.content);
 		return (
 			<div className="msg msg-user">
 				<div className="bubble">
-					{imgs.length > 0 && (
+					{attachments.length > 0 && (
 						<div className="msg-images">
 							{imgs.map((c: any, i: number) => (
-								<img key={i} src={`data:${c.mimeType};base64,${c.data}`} alt="attachment" />
+								<img key={`img-${i}`} src={`data:${c.mimeType};base64,${c.data}`} alt="attachment" />
+							))}
+							{pdfs.map((c: any, i: number) => (
+								<div key={`pdf-${i}`} className="msg-file"><span className="msg-file-badge">PDF</span>{c.name || "document.pdf"}</div>
 							))}
 						</div>
 					)}

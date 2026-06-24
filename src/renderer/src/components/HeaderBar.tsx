@@ -21,10 +21,14 @@ function fmtDuration(ms: number): string {
  */
 function WorkTimer({
 	isStreaming,
+	isRetrying,
+	retryAttempt,
 	runStartedAt,
 	lastRunMs,
 }: {
 	isStreaming: boolean;
+	isRetrying?: boolean;
+	retryAttempt?: number;
 	runStartedAt?: number;
 	lastRunMs?: number;
 }) {
@@ -37,6 +41,9 @@ function WorkTimer({
 		return () => clearInterval(id);
 	}, [isStreaming]);
 
+	if (isRetrying && !isStreaming) {
+		return <span className="hb-timer working" title="Retrying a transient provider/network failure">Retrying{retryAttempt ? ` #${retryAttempt}` : ""}…</span>;
+	}
 	if (isStreaming && runStartedAt != null) {
 		return <span className="hb-timer working" title="Time the current run has been working">Working for {fmtDuration(now - runStartedAt)}</span>;
 	}
@@ -119,7 +126,13 @@ export function HeaderBar({
 				)}
 			</div>
 			<div className="hb-actions">
-				<WorkTimer isStreaming={!!state?.isStreaming} runStartedAt={state?.runStartedAt} lastRunMs={state?.lastRunMs} />
+				<WorkTimer
+					isStreaming={!!state?.isStreaming}
+					isRetrying={state?.isRetrying}
+					retryAttempt={state?.retryAttempt}
+					runStartedAt={state?.runStartedAt}
+					lastRunMs={state?.lastRunMs}
+				/>
 				<button
 					className={`btn btn-icon${rightPanelOpen ? " on" : ""}`}
 					onClick={onToggleRightPanel}
