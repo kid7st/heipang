@@ -45,15 +45,28 @@ function toolSummary(call: ToolCallContent): string {
 	const args = call.arguments || {};
 	const path = firstArg(args, ["path", "file", "filePath", "cwd", "url"]);
 	const shortPath = path ? baseName(path) : "";
-	if (name === "read") return shortPath ? `读取文件：${shortPath}` : "读取文件";
-	if (name === "write") return shortPath ? `写入文件：${shortPath}` : "写入文件";
-	if (name === "edit") return shortPath ? `修改文件：${shortPath}` : "修改文件";
-	if (name === "bash") return `运行命令${args.command ? `：${compact(args.command)}` : ""}`;
-	if (name === "grep") return `搜索内容${args.pattern ? `：${compact(args.pattern, 60)}` : ""}`;
-	if (name === "find") return `查找文件${args.pattern ? `：${compact(args.pattern, 60)}` : ""}`;
-	if (name === "ls") return shortPath ? `查看目录：${shortPath}` : "查看目录";
-	if (name === "read_url") return path ? `查看网页：${compact(path, 70)}` : "查看网页";
-	return `使用工具：${name}`;
+	if (name === "read") return shortPath ? `Read file: ${shortPath}` : "Read file";
+	if (name === "write") return shortPath ? `Write file: ${shortPath}` : "Write file";
+	if (name === "edit") return shortPath ? `Edit file: ${shortPath}` : "Edit file";
+	if (name === "bash") return `Run command${args.command ? `: ${compact(args.command)}` : ""}`;
+	if (name === "grep") return `Search content${args.pattern ? `: ${compact(args.pattern, 60)}` : ""}`;
+	if (name === "find") return `Find files${args.pattern ? `: ${compact(args.pattern, 60)}` : ""}`;
+	if (name === "ls") return shortPath ? `List directory: ${shortPath}` : "List directory";
+	if (name === "read_url") return path ? `Read web page: ${compact(path, 70)}` : "Read web page";
+	return `Use tool: ${name}`;
+}
+
+function activeProgressText(line: string): string {
+	return line
+		.replace(/^Read file/, "Reading file")
+		.replace(/^Write file/, "Writing file")
+		.replace(/^Edit file/, "Editing file")
+		.replace(/^Run command/, "Running command")
+		.replace(/^Search content/, "Searching content")
+		.replace(/^Find files/, "Finding files")
+		.replace(/^List directory/, "Listing directory")
+		.replace(/^Read web page/, "Reading web page")
+		.replace(/^Use tool/, "Using tool");
 }
 
 function progressLines(content: any[]): string[] {
@@ -65,10 +78,10 @@ function progressLines(content: any[]): string[] {
 
 function humanErrorMessage(error: string): string {
 	if (/terminated|fetch failed|network|connection|timeout|timed out|socket hang up/i.test(error)) {
-		return "网络或模型服务中断，本次回复没有完成。可以重新发送；临时中断会自动重试。";
+		return "Network or model service interrupted. This response did not finish. You can send again; temporary interruptions may retry automatically.";
 	}
 	if (/overloaded|service unavailable|too many requests|rate.?limit|429|503|504/i.test(error)) {
-		return "模型服务繁忙，本次回复没有完成。稍后重试即可。";
+		return "Model service is busy. This response did not finish. Try again later.";
 	}
 	if (/aborted|abort/i.test(error)) {
 		return "Request was aborted.";
@@ -114,14 +127,14 @@ export const MessageItem = memo(function MessageItem({ msg, active }: { msg: UIM
 					</div>
 				)}
 				{(progress.length > 0 || showLiveFallback) && (
-					<div className="agent-progress" title="简略显示 agent 正在做的事，不展示工具输出">
+					<div className="agent-progress" title="Brief agent progress; tool output is hidden">
 						{showLiveFallback ? (
-							<div className="agent-step"><span className="spinner sm" />正在思考下一步…</div>
+							<div className="agent-step"><span className="spinner sm" />Thinking about next step…</div>
 						) : (
 							progress.map((line, i) => (
 								<div className="agent-step" key={`${line}-${i}`}>
 									{active && i === progress.length - 1 ? <span className="spinner sm" /> : <span className="agent-step-dot">✓</span>}
-									<span>{active && i === progress.length - 1 ? line.replace(/^(读取|写入|修改|运行|搜索|查找|查看|使用)/, "正在$1") : line}</span>
+									<span>{active && i === progress.length - 1 ? activeProgressText(line) : line}</span>
 								</div>
 							))
 						)}
