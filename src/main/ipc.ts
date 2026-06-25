@@ -46,6 +46,7 @@ export function registerIpc(driver: Driver, getWindow: () => BrowserWindow | nul
 		onMessagesPatch: (from, messages) => send({ type: "patch", from, messages }),
 		onState: (state) => send({ type: "state", state }),
 		onTasks: (tasks) => send({ type: "tasks", tasks }),
+		onSessionUpdated: (path) => send({ type: "sessionUpdated", path }),
 		onRunComplete: (path) => {
 			send({ type: "sessionDone", path });
 			// Desktop ping ONLY when you've switched away (never nags while you watch).

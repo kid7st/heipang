@@ -100,6 +100,7 @@ export class Driver {
 	private onMessagesPatch?: (from: number, messages: UIMessage[]) => void;
 	private onState?: (state: ActiveState) => void;
 	private onTasks?: (tasks: Task[]) => void;
+	private onSessionUpdated?: (path?: string) => void;
 	private onRunComplete?: (path?: string) => void;
 	private onError?: (message: string) => void;
 	private onBackground?: (sessions: { path: string; cwd: string }[]) => void;
@@ -142,6 +143,7 @@ export class Driver {
 		onMessagesPatch: (from: number, messages: UIMessage[]) => void;
 		onState: (state: ActiveState) => void;
 		onTasks: (tasks: Task[]) => void;
+		onSessionUpdated: (path?: string) => void;
 		onRunComplete: (path?: string) => void;
 		onError: (message: string) => void;
 		onBackground?: (sessions: { path: string; cwd: string }[]) => void;
@@ -150,6 +152,7 @@ export class Driver {
 		this.onMessagesPatch = handlers.onMessagesPatch;
 		this.onState = handlers.onState;
 		this.onTasks = handlers.onTasks;
+		this.onSessionUpdated = handlers.onSessionUpdated;
 		this.onRunComplete = handlers.onRunComplete;
 		this.onError = handlers.onError;
 		this.onBackground = handlers.onBackground;
@@ -628,6 +631,7 @@ export class Driver {
 					}
 					this.flushEmit();
 					this.emitState();
+					this.onSessionUpdated?.(this.session?.sessionFile);
 					break;
 				case "agent_end": {
 					this.markRunEnd(this.session);
@@ -734,6 +738,7 @@ export class Driver {
 			this.unsubscribe?.();
 			this.unsubscribe = undefined;
 			const unsub = session.subscribe((event) => {
+				if (event.type === "message_end") this.onSessionUpdated?.(file);
 				if (event.type === "agent_end") {
 					this.markRunEnd(session);
 					this.finishBackground(file);

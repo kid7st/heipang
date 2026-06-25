@@ -8,17 +8,23 @@ export function MessageList({ messages, streaming }: { messages: UIMessage[]; st
 	const stickRef = useRef(true);
 
 	const items = useMemo(() => {
-		const out: { m: UIMessage; i: number }[] = [];
+		const out: { m: UIMessage; i: number; synthetic?: boolean; active?: boolean }[] = [];
 		messages.forEach((m, i) => {
 			if (m.role === "toolResult") return;
 			if (m.role === "assistant") {
 				const hasText = m.content.some((c) => c.type === "text" && c.text.trim());
-				if (!hasText && !m.errorMessage) return;
+				const hasTool = m.content.some((c) => c.type === "toolCall");
+				const keepEmptyLiveMessage = streaming && i === messages.length - 1;
+				if (!hasText && !hasTool && !m.errorMessage && !keepEmptyLiveMessage) return;
 			}
 			out.push({ m, i });
 		});
+		if (streaming && out.length > 0 && out[out.length - 1].m.role === "user") {
+			out.push({ m: { role: "assistant", content: [], timestamp: Date.now() }, i: messages.length, synthetic: true });
+		}
+		if (streaming && out.length > 0) out[out.length - 1].active = true;
 		return out;
-	}, [messages]);
+	}, [messages, streaming]);
 
 	// Auto-stick to bottom while streaming or when already at bottom.
 	useEffect(() => {
@@ -48,7 +54,7 @@ export function MessageList({ messages, streaming }: { messages: UIMessage[]; st
 				stickRef.current = dist < 80;
 			}}
 		>
-			{(it) => <MessageItem key={it.i} msg={it.m} />}
+			{(it) => <MessageItem key={`${it.synthetic ? "live" : "msg"}:${it.i}`} msg={it.m} active={it.active} />}
 		</VList>
 	);
 }

@@ -115,6 +115,9 @@ export interface SessionListItem {
 	messageCount: number;
 	firstMessage: string;
 	allMessagesText: string;
+	// Renderer-only placeholder for a just-created session that has not shown up
+	// in SessionManager.listAll() yet.
+	synthetic?: boolean;
 }
 
 export type TaskStatus = "open" | "in_progress" | "done" | "declined" | "cancelled";
@@ -226,6 +229,7 @@ export type StreamEvent =
 	| { type: "patch"; from: number; messages: UIMessage[] } // incremental tail during streaming
 	| { type: "state"; state: ActiveState }
 	| { type: "tasks"; tasks: Task[] }
+	| { type: "sessionUpdated"; path?: string } // a message was persisted; refresh the sidebar list
 	| { type: "sessionDone"; path?: string }
 	| { type: "background"; sessions: { path: string; cwd: string }[] } // sessions still running in the background
 	| { type: "updateProgress"; phase: "download" | "install" | "relaunch" | "error"; pct?: number; message?: string }

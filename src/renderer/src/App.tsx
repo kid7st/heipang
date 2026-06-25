@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
 	ActiveState,
 	CommandInfo,
@@ -24,6 +24,18 @@ function baseName(p: string): string {
 	if (!p) return "";
 	const parts = p.replace(/\/$/, "").split("/");
 	return parts[parts.length - 1] || p;
+}
+
+function compactText(s: string): string {
+	return s.replace(/\s+/g, " ").trim();
+}
+
+function messagePlainText(m: UIMessage): string {
+	if (m.role === "user") {
+		if (typeof m.content === "string") return compactText(m.content);
+		return compactText(m.content.map((c) => (c.type === "text" ? c.text : "")).join(" "));
+	}
+	return compactText(m.content.map((c) => (c.type === "text" ? c.text : "")).join(" "));
 }
 
 export default function App() {
@@ -68,6 +80,25 @@ export default function App() {
 	const refreshSessions = useCallback(async () => {
 		setSessions(await window.pi.listSessions());
 	}, []);
+	const sessionRefreshTimers = useRef<ReturnType<typeof setTimeout>[]>([]);
+	const queueRefreshSessions = useCallback(
+		(delays: number[] = [0, 700, 2000, 5000]) => {
+			for (const timer of sessionRefreshTimers.current) clearTimeout(timer);
+			sessionRefreshTimers.current = [];
+			for (const delay of delays) {
+				const timer = setTimeout(() => {
+					sessionRefreshTimers.current = sessionRefreshTimers.current.filter((t) => t !== timer);
+					refreshSessions();
+				}, delay);
+				sessionRefreshTimers.current.push(timer);
+			}
+		},
+		[refreshSessions],
+	);
+	useEffect(() => () => {
+		for (const timer of sessionRefreshTimers.current) clearTimeout(timer);
+		sessionRefreshTimers.current = [];
+	}, []);
 	const refreshUsage = useCallback(() => {
 		window.pi.getUsage().then(setUsage).catch(() => {});
 	}, []);
@@ -91,9 +122,9 @@ export default function App() {
 			setTasks(t);
 			setCommands(cmds);
 		})();
-		refreshSessions();
+		queueRefreshSessions();
 		refreshUsage();
-	}, [refreshSessions, refreshUsage]);
+	}, [queueRefreshSessions, refreshUsage]);
 
 	useEffect(() => {
 		return window.pi.onEvent((e) => {
@@ -110,7 +141,11 @@ export default function App() {
 				case "tasks":
 					setTasks(e.tasks);
 					break;
+				case "sessionUpdated":
+					queueRefreshSessions();
+					break;
 				case "sessionDone":
+					queueRefreshSessions();
 					if (e.path && (e.path !== activeFileRef.current || !document.hasFocus())) {
 						const p = e.path;
 						setUnread((prev) => new Set(prev).add(p));
@@ -126,7 +161,7 @@ export default function App() {
 					break;
 			}
 		});
-	}, [flash]);
+	}, [flash, queueRefreshSessions]);
 
 	useEffect(() => window.pi.onRequest((req) => setRequest(req)), []);
 
@@ -195,12 +230,10 @@ export default function App() {
 			}
 			const hadSession = !!state;
 			await window.pi.sendMessage(text, images);
-			if (!hadSession) {
-				setState(await window.pi.getActiveState());
-				refreshSessions();
-			}
+			queueRefreshSessions();
+			if (!hadSession) setState(await window.pi.getActiveState());
 		},
-		[state, refreshSessions, showUsage],
+		[state, queueRefreshSessions, showUsage],
 	);
 
 	const loadInto = useCallback(
@@ -227,8 +260,8 @@ export default function App() {
 		const dir = await window.pi.pickDirectory();
 		if (!dir) return;
 		await loadInto(() => window.pi.newSession(dir));
-		refreshSessions();
-	}, [loadInto, refreshSessions]);
+		queueRefreshSessions();
+	}, [loadInto, queueRefreshSessions]);
 
 	const onOpen = useCallback(
 		(s: SessionListItem) => {
@@ -238,10 +271,11 @@ export default function App() {
 				n.delete(s.path);
 				return n;
 			});
-			if (s.path === state?.sessionFile) return;
+			const currentPath = state?.sessionFile ?? (state ? `synthetic:${state.sessionId}` : undefined);
+			if (s.synthetic || s.path === currentPath) return;
 			return loadInto(() => window.pi.openSession(s.path));
 		},
-		[state?.sessionFile, loadInto],
+		[state, loadInto],
 	);
 
 	const clearIfActive = (path: string) => {
@@ -389,11 +423,33 @@ export default function App() {
 		window.addEventListener("mouseup", onUp);
 	}, []);
 
+	const activePath = state?.sessionFile ?? (state ? `synthetic:${state.sessionId}` : undefined);
+	const displayedSessions = useMemo<SessionListItem[]>(() => {
+		if (!state || !activePath) return sessions;
+		if (sessions.some((s) => s.path === activePath || s.id === state.sessionId)) return sessions;
+		const texts = messages.map(messagePlainText).filter(Boolean);
+		const lastMessageAt = messages.reduce((max, m) => Math.max(max, m.timestamp || 0), 0);
+		const now = Date.now();
+		const synthetic: SessionListItem = {
+			path: activePath,
+			id: state.sessionId,
+			cwd: state.cwd,
+			name: state.sessionName,
+			created: state.runStartedAt ?? now,
+			modified: Math.max(lastMessageAt, state.runStartedAt ?? 0, now),
+			messageCount: messages.length,
+			firstMessage: texts[0] || "New session",
+			allMessagesText: texts.join("\n"),
+			synthetic: true,
+		};
+		return [synthetic, ...sessions];
+	}, [activePath, messages, sessions, state]);
+
 	const runningFiles = new Set(bgRunning.map((b) => b.path));
-	if (state?.isStreaming && state.sessionFile) runningFiles.add(state.sessionFile);
+	if (state?.isStreaming && activePath) runningFiles.add(activePath);
 	const runningCwds = new Set(bgRunning.map((b) => b.cwd));
 	if (state?.isStreaming) runningCwds.add(state.cwd);
-	const activeSession = sessions.find((s) => s.path === state?.sessionFile);
+	const activeSession = displayedSessions.find((s) => s.path === activePath || (state?.sessionFile && s.path === state.sessionFile));
 	const title = state?.sessionName || activeSession?.name || activeSession?.firstMessage || "";
 	const folderLabel = state ? gui.workspaceNames[state.cwd] || baseName(state.cwd) : "";
 
@@ -403,36 +459,36 @@ export default function App() {
 	const onNewInFolder = useCallback(
 		async (cwd: string) => {
 			await loadInto(() => window.pi.newSession(cwd));
-			refreshSessions();
+			queueRefreshSessions();
 		},
-		[loadInto, refreshSessions],
+		[loadInto, queueRefreshSessions],
 	);
 
 	return (
 		<div className="app" style={{ gridTemplateColumns: cols }}>
 			{!gui.sidebarCollapsed && (
 				<Sidebar
-					sessions={sessions}
-						activeFile={state?.sessionFile}
-						runningCwds={runningCwds}
-						workspaceNames={gui.workspaceNames}
-						onNew={onNew}
-						onOpen={onOpen}
-						onArchiveSession={onArchiveSession}
-						onDeleteSession={onDeleteSession}
-						onDeleteFolder={onDeleteFolder}
-						onOpenFolder={onOpenFolder}
-						onRenameFolder={onRenameFolder}
-						onRenameSession={onRenameSession}
-						onNewInFolder={onNewInFolder}
-						onEditMemory={(cwd, name) => setMemory({ cwd, label: name })}
-						unread={unread}
-						runningFiles={runningFiles}
-						folderOrder={gui.folderOrder}
-						onReorderFolders={async (order) => setGui(await window.pi.setGuiSettings({ folderOrder: order }))}
-						onSettings={() => setSettingsTab("general")}
-						onCollapseSidebar={() => setCollapsed(true)}
-					/>
+					sessions={displayedSessions}
+					activeFile={activePath}
+					runningCwds={runningCwds}
+					workspaceNames={gui.workspaceNames}
+					onNew={onNew}
+					onOpen={onOpen}
+					onArchiveSession={onArchiveSession}
+					onDeleteSession={onDeleteSession}
+					onDeleteFolder={onDeleteFolder}
+					onOpenFolder={onOpenFolder}
+					onRenameFolder={onRenameFolder}
+					onRenameSession={onRenameSession}
+					onNewInFolder={onNewInFolder}
+					onEditMemory={(cwd, name) => setMemory({ cwd, label: name })}
+					unread={unread}
+					runningFiles={runningFiles}
+					folderOrder={gui.folderOrder}
+					onReorderFolders={async (order) => setGui(await window.pi.setGuiSettings({ folderOrder: order }))}
+					onSettings={() => setSettingsTab("general")}
+					onCollapseSidebar={() => setCollapsed(true)}
+				/>
 			)}
 			{!gui.sidebarCollapsed && (
 				<div className="resizer" style={{ left: sbWidth - 4 }} onMouseDown={startResize} />

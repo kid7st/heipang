@@ -338,20 +338,22 @@ export function Sidebar({
 									<span className="session-time">{relTime(s.modified)}</span>
 								</div>
 							</button>
-							<div className="row-actions">
-								<button
-									className="row-action"
-									title="Session actions"
-									onClick={(e) => {
-										e.stopPropagation();
-										const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-										setSmenu({ session: s, x: r.right, y: r.bottom });
-									}}
-									type="button"
-								>
-									<DotsIcon />
-								</button>
-							</div>
+							{!s.synthetic && (
+								<div className="row-actions">
+									<button
+										className="row-action"
+										title="Session actions"
+										onClick={(e) => {
+											e.stopPropagation();
+											const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+											setSmenu({ session: s, x: r.right, y: r.bottom });
+										}}
+										type="button"
+									>
+										<DotsIcon />
+									</button>
+								</div>
+							)}
 						</div>
 					);
 				}}

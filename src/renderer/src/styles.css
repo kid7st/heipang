@@ -1260,6 +1260,35 @@ select {
 	border-radius: 14px 14px 14px 4px;
 	padding: 4px 16px;
 }
+.agent-progress {
+	display: inline-flex;
+	flex-direction: column;
+	gap: 4px;
+	max-width: 75%;
+	margin: 3px 0;
+	padding: 7px 10px;
+	border-left: 2px solid var(--accent-soft-2);
+	border-radius: 8px;
+	background: rgba(246, 249, 246, 0.72);
+	color: var(--fg-dim);
+	font-size: 12px;
+}
+.agent-step {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	min-width: 0;
+}
+.agent-step span:last-child {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.agent-step-dot {
+	flex: 0 0 auto;
+	color: var(--accent);
+	font-size: 11px;
+}
 .collapsible {
 	margin: 4px 0;
 }
