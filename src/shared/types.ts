@@ -145,9 +145,16 @@ export interface SkillItem {
 	filePath: string;
 }
 
+export interface ResourceDiagnostic {
+	type: "warning" | "error" | "collision";
+	message: string;
+	path?: string;
+}
+
 export interface ResourcesPayload {
 	extensions: ExtensionItem[];
 	skills: SkillItem[];
+	skillDiagnostics: ResourceDiagnostic[];
 	extensionsDir: string;
 	skillsDir: string;
 }

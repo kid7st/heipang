@@ -99,6 +99,12 @@ function UpdateCard() {
 type Tab = "general" | "models" | "accounts" | "extensions" | "skills";
 const THINKING: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh"];
 
+function fileLabel(path?: string): string {
+	if (!path) return "Skill warning";
+	const parts = path.replace(/\/$/, "").split(/[\\/]/);
+	return parts[parts.length - 2] || parts[parts.length - 1] || path;
+}
+
 function ContentViewer({ title, path, onClose }: { title: string; path: string; onClose: () => void }) {
 	const [content, setContent] = useState("Loading…");
 	useEffect(() => {
@@ -323,6 +329,16 @@ export function SettingsModal({
 						<div className="card-grid">
 							{!res && <div className="setting-note">Loading…</div>}
 							{res?.skills.length === 0 && <div className="setting-note">No skills found.</div>}
+							{res?.skillDiagnostics.map((d, i) => (
+								<div
+									className="card res-card has-error"
+									key={`${d.path || "skill-diagnostic"}:${i}`}
+									onClick={() => d.path && setViewer({ title: fileLabel(d.path), path: d.path })}
+								>
+									<div className="res-name">{fileLabel(d.path)}</div>
+									<div className="res-error">{d.type}: {d.message}</div>
+								</div>
+							))}
 							{res?.skills.map((s) => (
 								<div className="card res-card" key={s.filePath} onClick={() => setViewer({ title: s.name, path: s.filePath })}>
 									<button className="card-x" title="Delete" onClick={(ev) => { ev.stopPropagation(); delSkill(s.filePath, s.name); }} type="button">

@@ -178,6 +178,7 @@ export class Driver {
 					.map((er) => ({ name: basename(er.path).replace(/\.[tj]s$/, ""), path: er.path, tools: [], commands: [], error: er.error })),
 			),
 			skills: skillsRes.skills.map((s) => ({ name: s.name, description: s.description, filePath: s.filePath })),
+			skillDiagnostics: skillsRes.diagnostics.map((d) => ({ type: d.type, message: d.message, path: d.path })),
 			extensionsDir: join(this.agentDir, "extensions"),
 			skillsDir: join(this.agentDir, "skills"),
 		};

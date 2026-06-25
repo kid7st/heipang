@@ -143,6 +143,105 @@ function convertContentBlocks(content) {
 	console.log("[patch-pi-pdf] patched Anthropic PDF document support");
 }
 
+function patchFrontmatterParser() {
+	const file = join(process.cwd(), "node_modules", "@mariozechner", "pi-coding-agent", "dist", "utils", "frontmatter.js");
+	if (!existsSync(file)) {
+		console.warn(`[patch-pi-pdf] skipped frontmatter: ${file} not found`);
+		return;
+	}
+	let src = readFileSync(file, "utf8");
+	if (src.includes("function parseLenientFrontmatter")) {
+		console.log("[patch-pi-pdf] frontmatter already patched");
+		return;
+	}
+
+	const oldParseFrontmatter = `export const parseFrontmatter = (content) => {
+    const { yamlString, body } = extractFrontmatter(content);
+    if (!yamlString) {
+        return { frontmatter: {}, body };
+    }
+    const parsed = parse(yamlString);
+    return { frontmatter: (parsed ?? {}), body };
+};
+`;
+	const newParseFrontmatter = `function unquoteFrontmatterValue(value) {
+    const trimmed = value.trim();
+    if ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'"))) {
+        return trimmed.slice(1, -1);
+    }
+    return trimmed;
+}
+function parseLenientFrontmatter(yamlString) {
+    try {
+        return parse(yamlString) ?? {};
+    }
+    catch (error) {
+        const out = { __piFrontmatterWarning: error instanceof Error ? error.message : String(error) };
+        const lines = yamlString.split("\\n");
+        for (let i = 0; i < lines.length; i++) {
+            const m = lines[i].match(/^([A-Za-z0-9_-]+):(?:\\s*)(.*)$/);
+            if (!m)
+                continue;
+            const key = m[1];
+            let value = m[2] ?? "";
+            if (/^[>|]/.test(value.trim())) {
+                const block = [];
+                for (i++; i < lines.length; i++) {
+                    const line = lines[i];
+                    if (/^[A-Za-z0-9_-]+:/.test(line)) {
+                        i--;
+                        break;
+                    }
+                    block.push(line.replace(/^ {1,2}/, ""));
+                }
+                out[key] = block.join(value.trim().startsWith(">") ? " " : "\\n").trim();
+            }
+            else {
+                out[key] = unquoteFrontmatterValue(value);
+            }
+        }
+        return out;
+    }
+}
+export const parseFrontmatter = (content) => {
+    const { yamlString, body } = extractFrontmatter(content);
+    if (!yamlString) {
+        return { frontmatter: {}, body };
+    }
+    const parsed = parseLenientFrontmatter(yamlString);
+    return { frontmatter: (parsed ?? {}), body };
+};
+`;
+	if (!src.includes(oldParseFrontmatter)) {
+		throw new Error("[patch-pi-pdf] expected frontmatter parser block not found; pi-coding-agent may have changed");
+	}
+	src = src.replace(oldParseFrontmatter, newParseFrontmatter);
+
+	const skillsFile = join(process.cwd(), "node_modules", "@mariozechner", "pi-coding-agent", "dist", "core", "skills.js");
+	if (existsSync(skillsFile)) {
+		let skills = readFileSync(skillsFile, "utf8");
+		if (!skills.includes("frontmatter.__piFrontmatterWarning")) {
+			const anchor = `        const skillDir = dirname(filePath);
+        const parentDirName = basename(skillDir);
+`;
+			const replacement = `        const skillDir = dirname(filePath);
+        const parentDirName = basename(skillDir);
+        if (frontmatter.__piFrontmatterWarning) {
+            diagnostics.push({ type: "warning", message: ` + "`Invalid YAML frontmatter was loaded leniently: ${frontmatter.__piFrontmatterWarning}`" + `, path: filePath });
+        }
+`;
+			if (!skills.includes(anchor)) {
+				throw new Error("[patch-pi-pdf] expected skills diagnostics anchor not found; pi-coding-agent may have changed");
+			}
+			skills = skills.replace(anchor, replacement);
+			writeFileSync(skillsFile, skills);
+		}
+	}
+
+	writeFileSync(file, src);
+	console.log("[patch-pi-pdf] patched lenient skill frontmatter parsing");
+}
+
 function patchOpenAIResponses() {
 	const file = join(process.cwd(), "node_modules", "@mariozechner", "pi-ai", "dist", "providers", "openai-responses-shared.js");
 	if (!existsSync(file)) {
@@ -213,3 +312,4 @@ export function convertResponsesMessages`;
 
 patchAnthropic();
 patchOpenAIResponses();
+patchFrontmatterParser();
