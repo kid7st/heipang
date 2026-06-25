@@ -334,9 +334,6 @@ export function Sidebar({
 									)}
 									{s.name || s.firstMessage || "(empty)"}
 								</div>
-								<div className="session-meta">
-									<span className="session-time">{relTime(s.modified)}</span>
-								</div>
 							</button>
 							{!s.synthetic && (
 								<div className="row-actions">
