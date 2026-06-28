@@ -10,6 +10,7 @@ import type {
 	UIMessage,
 	UsageInfo,
 } from "../../shared/types";
+import heipangBg from "./assets/heipang-bg.png";
 import { Composer } from "./components/Composer";
 import { HeaderBar } from "./components/HeaderBar";
 import { MemoryEditor } from "./components/MemoryEditor";
@@ -504,7 +505,10 @@ export default function App() {
 					onToggleRightPanel={toggleRightPanel}
 					onRenameActive={onRenameActive}
 				/>
-				<div className="conv">
+				<div
+					className="conv"
+					style={{ ["--heipang-bg" as string]: `url(${heipangBg})` }}
+				>
 					{convLoading ? (
 						<div className="conv-loading">Loading conversation…</div>
 					) : (
