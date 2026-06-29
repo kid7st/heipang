@@ -10,10 +10,17 @@ import type { UpdateCheck } from "../shared/types.js";
 // app can fetch updates anonymously (no embedded token).
 const RELEASE_FEED_BASE = "https://raw.githubusercontent.com/kuaai/heipang-releases/main";
 
+// Both parallel builds share package.json `name` ("heipang"), so app.getName()
+// is identical for HEIPANG and HEIPANG Meta. Detect the variant from the bundle
+// path/appId instead, so each app updates from its own feed.
+function isMetaBuild(): boolean {
+	const hay = `${process.execPath} ${app.getAppPath()}`;
+	return /HEIPANG Meta|heipang[._-]meta/i.test(hay);
+}
+
 function latestUrl(): string {
-	const name = app.getName();
-	if (name === "SI-YOU-XIN-REN") return `${RELEASE_FEED_BASE}/si-latest.json`;
-	if (name === "HEIPANG Meta") return `${RELEASE_FEED_BASE}/meta-latest.json`;
+	if (app.getName() === "SI-YOU-XIN-REN") return `${RELEASE_FEED_BASE}/si-latest.json`;
+	if (isMetaBuild()) return `${RELEASE_FEED_BASE}/meta-latest.json`;
 	return `${RELEASE_FEED_BASE}/heipang-latest.json`;
 }
 
