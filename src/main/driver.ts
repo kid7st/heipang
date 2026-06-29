@@ -18,6 +18,15 @@ import type {
 	ActiveState,
 	CommandInfo,
 	GuiSettings,
+	MetaClassification,
+	MetaConfirmPayload,
+	MetaInboxItem,
+	MetaProject,
+	MetaProjectInbox,
+	MetaRec,
+	MetaSrc,
+	MetaStatus,
+	MetaSummary,
 	ModelInfo,
 	ModelsPayload,
 	NewModelInput,
@@ -53,6 +62,12 @@ const DEFAULT_GUI_SETTINGS: GuiSettings = {
 	rightPanelWidth: 320,
 	sidebarCollapsed: false,
 };
+
+interface TriageEntry {
+	status: MetaStatus;
+	projectName?: string;
+	summary?: string;
+}
 
 const MAX_TASK_LEN = 20;
 function capTitle(s: string): string {
@@ -1270,5 +1285,371 @@ export class Driver {
 		this.session!.setThinkingLevel(level);
 		this.emitState();
 		return this.getActiveState()!;
+	}
+
+	// =====================================================================
+	// Meta Vincent: triage voicenote recordings into projects.
+	// All storage is ADDITIVE and never rewrites existing pi/HEIPANG data.
+	//   triage  -> ~/.pi/agent/meta-vincent/triage.json   (per recId status)
+	//   ideas   -> ~/.pi/agent/meta-vincent/ideas.json     (global Ideas pool)
+	//   inbox   -> <cwd>/.heipang-inbox.json               (per project to-do/idea/memory)
+	//   memory  -> appended (never rewritten) to <cwd>/AGENTS.md with a marker
+	// =====================================================================
+
+	private metaDir(): string {
+		return join(this.agentDir, "meta-vincent");
+	}
+	private triagePath(): string {
+		return join(this.metaDir(), "triage.json");
+	}
+	private ideasPath(): string {
+		return join(this.metaDir(), "ideas.json");
+	}
+	private inboxPath(cwd: string): string {
+		return join(cwd, ".heipang-inbox.json");
+	}
+	private workspaceRoot(): string {
+		return this.guiSettings.voicenoteWorkspace || join(homedir(), "Documents", "meetings");
+	}
+
+	private readJson<T>(p: string, fallback: T): T {
+		try {
+			return JSON.parse(readFileSync(p, "utf8")) as T;
+		} catch {
+			return fallback;
+		}
+	}
+	private writeJson(p: string, data: unknown): void {
+		try {
+			mkdirSync(dirname(p), { recursive: true });
+			writeFileSync(p, `${JSON.stringify(data, null, 2)}\n`, "utf8");
+		} catch {
+			/* ignore */
+		}
+	}
+
+	private readTriage(): Record<string, TriageEntry> {
+		return this.readJson<Record<string, TriageEntry>>(this.triagePath(), {});
+	}
+	private writeTriage(t: Record<string, TriageEntry>): void {
+		this.writeJson(this.triagePath(), t);
+	}
+
+	private readMeetings(): any[] {
+		const root = this.workspaceRoot();
+		const idx = join(root, "_index", "meetings.jsonl");
+		const out: any[] = [];
+		try {
+			if (existsSync(idx)) {
+				for (const ln of readFileSync(idx, "utf8").split("\n")) {
+					const s = ln.trim();
+					if (!s) continue;
+					try {
+						out.push(JSON.parse(s));
+					} catch {
+						/* skip bad line */
+					}
+				}
+			}
+		} catch {
+			/* ignore */
+		}
+		return out;
+	}
+
+	private recIdOf(m: any): string {
+		const notePath = m?.final_paths?.notes || "";
+		return m?.source_id || (notePath ? basename(notePath).replace(/\.md$/, "") : "");
+	}
+
+	private recFromMeta(m: any): MetaRec | null {
+		const recId = this.recIdOf(m);
+		if (!recId) return null;
+		const memory = (m.decisions ?? []).map((d: any) => (typeof d === "string" ? d : d?.decision)).filter((x: any): x is string => !!x && typeof x === "string");
+		const todo = (m.action_items ?? []).map((a: any) => (typeof a === "string" ? a : a?.task)).filter((x: any): x is string => !!x && typeof x === "string");
+		const ideas = (m.open_questions ?? []).map((q: any) => (typeof q === "string" ? q : q?.question)).filter((x: any): x is string => !!x && typeof x === "string");
+		return {
+			recId,
+			title: m.title || "(untitled)",
+			date: m.date || "",
+			time: m.start_time || "",
+			notePath: m?.final_paths?.notes || "",
+			status: "pending",
+			memory,
+			todo,
+			ideas,
+		};
+	}
+
+	private findRawMeta(recId: string): any | undefined {
+		const metas = this.readMeetings();
+		let found: any | undefined;
+		for (const m of metas) if (this.recIdOf(m) === recId) found = m; // keep latest occurrence
+		return found;
+	}
+
+	metaListRecordings(): MetaRec[] {
+		const byId = new Map<string, MetaRec>();
+		for (const m of this.readMeetings()) {
+			const r = this.recFromMeta(m);
+			if (r) byId.set(r.recId, r); // latest occurrence wins
+		}
+		const triage = this.readTriage();
+		const list = [...byId.values()].map((r) => {
+			const t = triage[r.recId];
+			return t ? { ...r, status: t.status, summary: t.summary, projectName: t.projectName } : r;
+		});
+		list.sort((a, b) => `${b.date} ${b.time}`.localeCompare(`${a.date} ${a.time}`));
+		return list;
+	}
+
+	private async projectCwds(): Promise<string[]> {
+		const infos = await SessionManager.listAll();
+		const set = new Set<string>();
+		for (const s of infos) if (s.cwd) set.add(s.cwd);
+		return [...set];
+	}
+	private workspaceName(cwd: string): string {
+		return this.guiSettings.workspaceNames[cwd] || basename(cwd) || cwd;
+	}
+	private readInbox(cwd: string): MetaProjectInbox {
+		const d = this.readJson<Partial<MetaProjectInbox>>(this.inboxPath(cwd), {});
+		return { todo: d.todo ?? [], idea: d.idea ?? [], memory: d.memory ?? [] };
+	}
+	private writeInbox(cwd: string, ib: MetaProjectInbox): void {
+		this.writeJson(this.inboxPath(cwd), ib);
+	}
+	private inboxCount(cwd: string): number {
+		const ib = this.readInbox(cwd);
+		return ib.todo.length + ib.idea.length + ib.memory.length;
+	}
+
+	async metaListProjects(): Promise<MetaProject[]> {
+		const cwds = await this.projectCwds();
+		return cwds
+			.map((cwd) => ({ cwd, name: this.workspaceName(cwd), count: this.inboxCount(cwd) }))
+			.sort((a, b) => a.name.localeCompare(b.name));
+	}
+
+	async metaGetSummary(): Promise<MetaSummary> {
+		const recs = this.metaListRecordings();
+		const pending = recs.filter((r) => r.status === "pending").length;
+		const ideas = this.readJson<MetaInboxItem[]>(this.ideasPath(), []).length;
+		const inboxByCwd: Record<string, number> = {};
+		for (const cwd of await this.projectCwds()) {
+			const n = this.inboxCount(cwd);
+			if (n) inboxByCwd[cwd] = n;
+		}
+		return { pending, ideas, inboxByCwd };
+	}
+
+	metaSetStatus(recId: string, status: MetaStatus): void {
+		const t = this.readTriage();
+		t[recId] = { ...(t[recId] ?? { status }), status };
+		this.writeTriage(t);
+	}
+	metaUndo(recId: string): void {
+		const t = this.readTriage();
+		delete t[recId];
+		this.writeTriage(t);
+	}
+
+	metaGetInbox(cwd: string): MetaProjectInbox {
+		return this.readInbox(cwd);
+	}
+
+	metaInboxAction(
+		cwd: string,
+		action: "toggleTodo" | "deleteTodo" | "deleteIdea" | "deleteMemory" | "ideaToPool" | "markStarted",
+		index: number,
+	): MetaProjectInbox {
+		const ib = this.readInbox(cwd);
+		if (action === "toggleTodo" && ib.todo[index]) ib.todo[index].done = !ib.todo[index].done;
+		else if (action === "markStarted" && ib.todo[index]) ib.todo[index].started = true;
+		else if (action === "deleteTodo") ib.todo.splice(index, 1);
+		else if (action === "deleteIdea") ib.idea.splice(index, 1);
+		else if (action === "deleteMemory") {
+			const m = ib.memory.splice(index, 1)[0];
+			if (m) this.removeMemoryLine(cwd, m);
+		} else if (action === "ideaToPool") {
+			const it = ib.idea.splice(index, 1)[0];
+			if (it) {
+				const pool = this.readJson<MetaInboxItem[]>(this.ideasPath(), []);
+				pool.push(it);
+				this.writeJson(this.ideasPath(), pool);
+			}
+		}
+		this.writeInbox(cwd, ib);
+		return ib;
+	}
+
+	metaListIdeas(): MetaInboxItem[] {
+		return this.readJson<MetaInboxItem[]>(this.ideasPath(), []);
+	}
+	metaIdeaAction(action: "delete" | "fileToProject", index: number, cwd?: string): MetaInboxItem[] {
+		const pool = this.readJson<MetaInboxItem[]>(this.ideasPath(), []);
+		if (action === "delete") pool.splice(index, 1);
+		else if (action === "fileToProject" && cwd) {
+			const it = pool.splice(index, 1)[0];
+			if (it) {
+				const ib = this.readInbox(cwd);
+				ib.idea.push(it);
+				this.writeInbox(cwd, ib);
+			}
+		}
+		this.writeJson(this.ideasPath(), pool);
+		return pool;
+	}
+
+	metaGetConfig(): { workspace: string } {
+		return { workspace: this.workspaceRoot() };
+	}
+	metaSetWorkspace(path: string): { workspace: string } {
+		this.setGuiSettings({ voicenoteWorkspace: path });
+		return { workspace: this.workspaceRoot() };
+	}
+
+	metaConfirmSort(recId: string, payload: MetaConfirmPayload): void {
+		const rec = this.metaListRecordings().find((r) => r.recId === recId);
+		const src: MetaSrc = {
+			recId,
+			title: rec?.title ?? "",
+			date: rec?.date ?? "",
+			time: rec?.time ?? "",
+			notePath: rec?.notePath ?? "",
+		};
+		const { cwd, projectName, memory, todo, ideas, summary } = payload;
+		if (cwd && (memory.length || todo.length)) {
+			const ib = this.readInbox(cwd);
+			for (const t of todo) ib.todo.push({ text: t, done: false, src });
+			for (const m of memory) ib.memory.push({ text: m, src });
+			this.writeInbox(cwd, ib);
+			if (memory.length) this.appendMemoryLines(cwd, memory, src);
+		}
+		for (const idea of ideas) {
+			if (idea.cwd) {
+				const ib = this.readInbox(idea.cwd);
+				ib.idea.push({ text: idea.text, src });
+				this.writeInbox(idea.cwd, ib);
+			} else {
+				const pool = this.readJson<MetaInboxItem[]>(this.ideasPath(), []);
+				pool.push({ text: idea.text, src });
+				this.writeJson(this.ideasPath(), pool);
+			}
+		}
+		const t = this.readTriage();
+		t[recId] = { status: "processed", projectName, summary };
+		this.writeTriage(t);
+	}
+
+	private memoryMarker(text: string, src: MetaSrc): string {
+		const meta = `${src.recId} | ${src.date} ${src.time} ${(src.title || "").replace(/--+>/g, "")}`.trim();
+		return `- ${text}  <!-- meta-vincent: ${meta} -->`;
+	}
+	private appendMemoryLines(cwd: string, items: string[], src: MetaSrc): void {
+		const p = join(cwd, "AGENTS.md");
+		let cur = "";
+		try {
+			cur = existsSync(p) ? readFileSync(p, "utf8") : "";
+		} catch {
+			cur = "";
+		}
+		const heading = "## Memory from recordings";
+		let add = "";
+		if (!cur.includes(heading)) add += `${cur && !cur.endsWith("\n") ? "\n" : ""}\n${heading}\n`;
+		for (const text of items) add += `${this.memoryMarker(text, src)}\n`;
+		try {
+			mkdirSync(dirname(p), { recursive: true });
+			writeFileSync(p, cur + add, "utf8");
+		} catch {
+			/* ignore */
+		}
+	}
+	private removeMemoryLine(cwd: string, item: MetaInboxItem): void {
+		const p = join(cwd, "AGENTS.md");
+		if (!existsSync(p)) return;
+		try {
+			const line = this.memoryMarker(item.text, item.src).trim();
+			const heading = "## Memory from recordings";
+			let kept = readFileSync(p, "utf8")
+				.split("\n")
+				.filter((l) => l.trim() !== line);
+			// If our managed section is now empty, drop the heading too (and any blank
+			// line we inserted before it), restoring the file close to its original.
+			if (!kept.some((l) => l.includes("meta-vincent:"))) {
+				kept = kept.filter((l) => l.trim() !== heading);
+				while (kept.length > 1 && kept[kept.length - 1].trim() === "" && kept[kept.length - 2].trim() === "") kept.pop();
+				if (kept.length && kept[kept.length - 1].trim() === "") kept.pop();
+			}
+			writeFileSync(p, kept.join("\n"), "utf8");
+		} catch {
+			/* ignore */
+		}
+	}
+
+	/** meta-agent: map a messy recording to one of the user's real projects (cwds). */
+	async metaClassify(recId: string): Promise<MetaClassification> {
+		const rec = this.metaListRecordings().find((r) => r.recId === recId);
+		const projects = await this.metaListProjects();
+		const empty: MetaClassification = { ideaCwds: (rec?.ideas ?? []).map(() => undefined) };
+		if (!rec || !projects.length) return empty;
+		const model = this.pickExtractionModel();
+		if (!model) return empty;
+		const raw = this.findRawMeta(recId);
+		const mentions: string[] = Array.isArray(raw?.projects) ? raw.projects : [];
+		const projList = projects.map((p, i) => `${i}. ${p.name}`).join("\n");
+		const ideaList = rec.ideas.map((q, i) => `${i}. ${q}`).join("\n");
+		const keyPoints = [...rec.todo, ...rec.memory].slice(0, 8).join(" | ");
+		const sys =
+			"You route a meeting recording to the user's REAL project list. The recording's own project mentions are messy and may not match the real names. " +
+			"Pick the single best matching project index for the whole recording, and for EACH open question pick the best project index (or -1 if it fits no specific project). " +
+			'Use -1 when nothing matches well. Return STRICT JSON ONLY: {"project": <index|-1>, "ideas": [<index|-1>, ...]} with ideas length equal to the number of open questions. No prose.';
+		const user =
+			`Real projects:\n${projList}\n\n` +
+			`Recording title: ${rec.title}\n` +
+			`Mentioned topics: ${mentions.join(", ")}\n` +
+			`Key points: ${keyPoints}\n\n` +
+			`Open questions (${rec.ideas.length}):\n${ideaList || "(none)"}`;
+		try {
+			const auth = await this.modelRegistry.getApiKeyAndHeaders(model);
+			if (!auth.ok) return empty;
+			const result = await completeSimple(
+				model,
+				{ systemPrompt: sys, messages: [{ role: "user", content: user, timestamp: Date.now() }] },
+				{ apiKey: auth.apiKey, headers: auth.headers, maxTokens: 400 },
+			);
+			const text = (result.content ?? []).filter((c: any) => c.type === "text").map((c: any) => c.text).join("");
+			const parsed = this.parseClassifyJson(text);
+			if (!parsed) return empty;
+			const pick = (i: number): { cwd?: string; name?: string } => {
+				const p = projects[i];
+				return p ? { cwd: p.cwd, name: p.name } : {};
+			};
+			const projSel = pick(parsed.project);
+			const ideaCwds = rec.ideas.map((_q, i) => {
+				const idx = parsed.ideas[i];
+				return typeof idx === "number" && idx >= 0 ? projects[idx]?.cwd : undefined;
+			});
+			return { cwd: projSel.cwd, projectName: projSel.name, ideaCwds };
+		} catch {
+			return empty;
+		}
+	}
+
+	private parseClassifyJson(text: string): { project: number; ideas: number[] } | null {
+		let s = text.trim();
+		const fence = s.match(/```(?:json)?\s*([\s\S]*?)```/);
+		if (fence) s = fence[1].trim();
+		const a = s.indexOf("{");
+		const b = s.lastIndexOf("}");
+		if (a >= 0 && b > a) s = s.slice(a, b + 1);
+		try {
+			const o = JSON.parse(s);
+			const project = typeof o.project === "number" ? o.project : -1;
+			const ideas = Array.isArray(o.ideas) ? o.ideas.map((x: any) => (typeof x === "number" ? x : -1)) : [];
+			return { project, ideas };
+		} catch {
+			return null;
+		}
 	}
 }

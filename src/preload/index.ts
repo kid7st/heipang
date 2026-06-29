@@ -58,6 +58,23 @@ const api: PiApi = {
 	checkForUpdate: () => ipcRenderer.invoke("pi:checkForUpdate"),
 	installUpdate: (url) => ipcRenderer.invoke("pi:installUpdate", url),
 
+	metaListRecordings: () => ipcRenderer.invoke("pi:metaListRecordings"),
+	metaGetSummary: () => ipcRenderer.invoke("pi:metaGetSummary"),
+	metaSetStatus: (recId, status) => ipcRenderer.invoke("pi:metaSetStatus", recId, status),
+	metaUndo: (recId) => ipcRenderer.invoke("pi:metaUndo", recId),
+	metaClassify: (recId) => ipcRenderer.invoke("pi:metaClassify", recId),
+	metaConfirmSort: (recId, payload) => ipcRenderer.invoke("pi:metaConfirmSort", recId, payload),
+	metaListProjects: () => ipcRenderer.invoke("pi:metaListProjects"),
+	metaGetInbox: (cwd) => ipcRenderer.invoke("pi:metaGetInbox", cwd),
+	metaInboxAction: (cwd, action, index) => ipcRenderer.invoke("pi:metaInboxAction", cwd, action, index),
+	metaListIdeas: () => ipcRenderer.invoke("pi:metaListIdeas"),
+	metaIdeaAction: (action, index, cwd) => ipcRenderer.invoke("pi:metaIdeaAction", action, index, cwd),
+	metaGetConfig: () => ipcRenderer.invoke("pi:metaGetConfig"),
+	metaSetWorkspace: (path) => ipcRenderer.invoke("pi:metaSetWorkspace", path),
+	metaExportHtml: (html, name) => ipcRenderer.invoke("pi:metaExportHtml", html, name),
+	metaExportPng: (html, name) => ipcRenderer.invoke("pi:metaExportPng", html, name),
+	metaShareLink: (html) => ipcRenderer.invoke("pi:metaShareLink", html),
+
 	pickDirectory: () => ipcRenderer.invoke("pi:pickDirectory"),
 	getHome: () => ipcRenderer.invoke("pi:getHome"),
 

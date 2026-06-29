@@ -11,7 +11,10 @@ import type { UpdateCheck } from "../shared/types.js";
 const RELEASE_FEED_BASE = "https://raw.githubusercontent.com/kuaai/heipang-releases/main";
 
 function latestUrl(): string {
-	return app.getName() === "SI-YOU-XIN-REN" ? `${RELEASE_FEED_BASE}/si-latest.json` : `${RELEASE_FEED_BASE}/heipang-latest.json`;
+	const name = app.getName();
+	if (name === "SI-YOU-XIN-REN") return `${RELEASE_FEED_BASE}/si-latest.json`;
+	if (name === "HEIPANG Meta") return `${RELEASE_FEED_BASE}/meta-latest.json`;
+	return `${RELEASE_FEED_BASE}/heipang-latest.json`;
 }
 
 interface RemoteLatest {
@@ -143,7 +146,7 @@ open "$DMG"
 
 		// Windows: NSIS silent update. electron-builder's installer relaunches the
 		// app automatically after a `/S` silent install.
-		const exe = join(dir, "HEIPANG-Setup.exe");
+		const exe = join(dir, `${app.getName().replace(/\s+/g, "-")}-Setup.exe`);
 		await download(url, exe, (p) => emit("download", p));
 		emit("install");
 		spawn(exe, ["/S", "--force-run"], { detached: true, stdio: "ignore" }).unref();

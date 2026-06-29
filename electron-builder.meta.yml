@@ -1,0 +1,35 @@
+# Parallel "HEIPANG Meta" build identity. Installs alongside HEIPANG (different
+# appId + productName + artifact names + update feed), so the original
+# HEIPANG.app is never touched. Build with:
+#   electron-builder --config electron-builder.meta.yml --mac dmg --arm64
+#   electron-builder --config electron-builder.meta.yml --win nsis --x64
+appId: com.elylyly.heipang.meta
+productName: HEIPANG Meta
+npmRebuild: false
+directories:
+  output: release-meta
+  buildResources: build
+files:
+  - out/**/*
+  - package.json
+  - "!**/*.map"
+asarUnpack:
+  - node_modules/@mariozechner/**
+  - node_modules/jiti/**
+mac:
+  target: dmg
+  category: public.app-category.developer-tools
+  icon: build/icon.icns
+  identity: null
+  hardenedRuntime: false
+  gatekeeperAssess: false
+dmg:
+  writeUpdateInfo: false
+  artifactName: HEIPANG-Meta-${arch}.${ext}
+win:
+  target: nsis
+  icon: build/icon.png
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  artifactName: HEIPANG-Meta-Setup.${ext}

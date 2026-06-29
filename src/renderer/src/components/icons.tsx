@@ -69,3 +69,70 @@ export function CloseIcon({ size }: P) {
 		</svg>
 	);
 }
+
+export function CheckIcon({ size }: P) {
+	return (
+		<svg {...base(size)}>
+			<path d="M20 6 9 17l-5-5" />
+		</svg>
+	);
+}
+
+export function PauseIcon({ size }: P) {
+	return (
+		<svg {...base(size)}>
+			<path d="M10 4v16M16 4v16" />
+		</svg>
+	);
+}
+
+export function UndoIcon({ size }: P) {
+	return (
+		<svg {...base(size)}>
+			<path d="M3 7v6h6" />
+			<path d="M3 13a9 9 0 1 0 3-7" />
+		</svg>
+	);
+}
+
+export function TargetIcon({ size }: P) {
+	return (
+		<svg {...base(size)}>
+			<circle cx="12" cy="12" r="8" />
+			<circle cx="12" cy="12" r="3" />
+		</svg>
+	);
+}
+
+export function WarnIcon({ size }: P) {
+	return (
+		<svg {...base(size)}>
+			<path d="M12 9v4M12 17h.01M10.3 3.9 2 18a2 2 0 0 0 1.7 3h16.6a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z" />
+		</svg>
+	);
+}
+
+export function MicIcon({ size }: P) {
+	return (
+		<svg {...base(size)}>
+			<rect x="9" y="3" width="6" height="11" rx="3" />
+			<path d="M5 11a7 7 0 0 0 14 0M12 18v3" />
+		</svg>
+	);
+}
+
+export function TrashIcon({ size }: P) {
+	return (
+		<svg {...base(size)}>
+			<path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M16 7v12a1 1 0 0 1-1 1H8a1 1 0 0 1-1-1V7" />
+		</svg>
+	);
+}
+
+export function ArrowRightIcon({ size }: P) {
+	return (
+		<svg {...base(size)}>
+			<path d="M5 12h14M13 6l6 6-6 6" />
+		</svg>
+	);
+}
