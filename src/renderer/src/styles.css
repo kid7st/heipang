@@ -2235,6 +2235,9 @@ select {
 	z-index: 140;
 	padding: 40px 16px;
 	overflow: auto;
+	/* Modal overlaps the draggable title-bar zone; without this, macOS treats
+	   clicks on header buttons as window drags and they never fire. */
+	-webkit-app-region: no-drag;
 }
 .mv-modal {
 	width: 100%;
