@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { MetaClassification, MetaInboxItem, MetaProject, MetaProjectInbox, MetaRec, MetaStatus } from "../../../shared/types";
+import { Markdown } from "./Markdown";
 import {
 	ArrowRightIcon,
 	CheckIcon,
@@ -63,6 +64,7 @@ export function MetaVincent({ flash, onStartTodo, onOpenConfig, onChanged, refre
 	const [todoChecked, setTodoChecked] = useState<Set<number>>(new Set());
 	const [ideaChecked, setIdeaChecked] = useState<Set<number>>(new Set());
 	const [ideaDest, setIdeaDest] = useState<Record<number, string>>({});
+	const [note, setNote] = useState<{ title: string; text: string; path: string; loading: boolean } | null>(null);
 	const modalRef = useRef<HTMLDivElement | null>(null);
 
 	const loadRecs = useCallback(async () => {
@@ -109,9 +111,23 @@ export function MetaVincent({ flash, onStartTodo, onOpenConfig, onChanged, refre
 		onChanged();
 	}, [loadRecs, loadProjects, loadIdeas, inboxCwd, onChanged]);
 
-	const openNote = (path: string) => {
-		if (path) window.pi.openPath(path);
-	};
+	// Show the original note Markdown INSIDE HEIPANG (the OS may have no .md handler).
+	const showNote = useCallback(
+		async (path: string, title: string) => {
+			if (!path) {
+				flash("This recording has no note file");
+				return;
+			}
+			setNote({ title, text: "", path, loading: true });
+			try {
+				const text = await window.pi.readFile(path);
+				setNote({ title, text, path, loading: false });
+			} catch {
+				setNote({ title, text: "_Could not read this note file._", path, loading: false });
+			}
+		},
+		[flash],
+	);
 
 	// ---- card actions ----
 	const setStatus = async (recId: string, status: MetaStatus, msg: string) => {
@@ -262,8 +278,8 @@ export function MetaVincent({ flash, onStartTodo, onOpenConfig, onChanged, refre
 	}, [memChecked, todoChecked, ideaChecked]);
 
 	// ---------------------------------------------------------------- render
-	const srcLine = (notePath: string, label: string) => (
-		<span className="src" onClick={() => openNote(notePath)} title="Open the recording note">
+	const srcLine = (notePath: string, title: string, label: string) => (
+		<span className="src" onClick={() => showNote(notePath, title)} title="View the recording note">
 			<MicIcon size={11} />
 			{label}
 		</span>
@@ -307,7 +323,7 @@ export function MetaVincent({ flash, onStartTodo, onOpenConfig, onChanged, refre
 					<Board
 						rows={boardRows}
 						statusFilter={statusFilter}
-						onOpenNote={openNote}
+						onOpenNote={(r) => showNote(r.notePath, r.title)}
 						onSort={openSort}
 						onSnooze={(id) => setStatus(id, "snoozed", "Snoozed")}
 						onHide={(id) => setStatus(id, "hidden", "Hidden (file kept)")}
@@ -346,7 +362,7 @@ export function MetaVincent({ flash, onStartTodo, onOpenConfig, onChanged, refre
 											/>
 											<div className="body">
 												<div className="tt">{x.text}</div>
-												{srcLine(x.src.notePath, `${x.src.date} ${x.src.time} · ${trim(x.src.title, 26)}`)}
+												{srcLine(x.src.notePath, x.src.title, `${x.src.date} ${x.src.time} · ${trim(x.src.title, 26)}`)}
 											</div>
 											<div className="ops">
 												{x.started ? (
@@ -387,7 +403,7 @@ export function MetaVincent({ flash, onStartTodo, onOpenConfig, onChanged, refre
 											<span className="mv-tagdot idea" style={{ marginTop: 5 }} />
 											<div className="body">
 												<div className="tt">{x.text}</div>
-												{srcLine(x.src.notePath, `${x.src.date} ${x.src.time} · ${trim(x.src.title, 26)}`)}
+												{srcLine(x.src.notePath, x.src.title, `${x.src.date} ${x.src.time} · ${trim(x.src.title, 26)}`)}
 											</div>
 											<div className="ops">
 												<button
@@ -456,7 +472,7 @@ export function MetaVincent({ flash, onStartTodo, onOpenConfig, onChanged, refre
 									<span className="mv-tagdot idea" style={{ marginTop: 5 }} />
 									<div className="body">
 										<div className="tt">{x.text}</div>
-										{srcLine(x.src.notePath, `${x.src.date} ${x.src.time} · ${trim(x.src.title, 26)}`)}
+										{srcLine(x.src.notePath, x.src.title, `${x.src.date} ${x.src.time} · ${trim(x.src.title, 26)}`)}
 									</div>
 									<div className="ops">
 										<select
@@ -625,6 +641,25 @@ export function MetaVincent({ flash, onStartTodo, onOpenConfig, onChanged, refre
 					</div>
 				</div>
 			)}
+
+			{note && (
+				<div className="mv-scrim" onClick={(e) => e.target === e.currentTarget && setNote(null)}>
+					<div className="mv-notemodal">
+						<div className="mv-nhead">
+							<h2>{note.title}</h2>
+							<button className="mv-sbtn xs" onClick={() => window.pi.openPath(note.path.replace(/\/[^/]+$/, ""))} type="button">
+								Show in folder
+							</button>
+							<button className="x" onClick={() => setNote(null)} type="button">
+								<CloseIcon />
+							</button>
+						</div>
+						<div className="mv-nbody">
+							{note.loading ? <div className="mv-none">Loading…</div> : <Markdown text={note.text} />}
+						</div>
+					</div>
+				</div>
+			)}
 		</div>
 	);
 }
@@ -640,7 +675,7 @@ function Board({
 }: {
 	rows: MetaRec[];
 	statusFilter: MetaStatus;
-	onOpenNote: (p: string) => void;
+	onOpenNote: (r: MetaRec) => void;
 	onSort: (r: MetaRec) => void;
 	onSnooze: (id: string) => void;
 	onHide: (id: string) => void;
@@ -662,11 +697,11 @@ function Board({
 						<span className="date">
 							{it.date} {it.time}
 						</span>
-						<button className="mv-note-btn" title="Open the original note (Markdown)" onClick={() => onOpenNote(it.notePath)} type="button">
+						<button className="mv-note-btn" title="View the original note (Markdown)" onClick={() => onOpenNote(it)} type="button">
 							<FileTextIcon size={12} /> note
 						</button>
 					</div>
-					<h3 onClick={() => onOpenNote(it.notePath)} title="Open the original note">
+					<h3 onClick={() => onOpenNote(it)} title="View the original note">
 						{it.title}
 					</h3>
 					<div className="row">
