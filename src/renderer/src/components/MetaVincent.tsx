@@ -111,6 +111,19 @@ export function MetaVincent({ flash, onStartTodo, onOpenConfig, onChanged, refre
 		onChanged();
 	}, [loadRecs, loadProjects, loadIdeas, inboxCwd, onChanged]);
 
+	// Any inbox edit must also refresh the project counts (Processed selector) and
+	// the global summary, so the sidebar folder badge updates immediately.
+	const inboxAction = useCallback(
+		async (action: "toggleTodo" | "deleteTodo" | "deleteIdea" | "deleteMemory" | "ideaToPool", i: number) => {
+			if (!inboxCwd) return;
+			setInbox(await window.pi.metaInboxAction(inboxCwd, action, i));
+			loadProjects();
+			loadIdeas();
+			onChanged();
+		},
+		[inboxCwd, loadProjects, loadIdeas, onChanged],
+	);
+
 	// Show the original note Markdown INSIDE HEIPANG (the OS may have no .md handler).
 	const showNote = useCallback(
 		async (path: string, title: string) => {
@@ -355,11 +368,7 @@ export function MetaVincent({ flash, onStartTodo, onOpenConfig, onChanged, refre
 								) : (
 									inbox.todo.map((x, i) => (
 										<div className={`mv-item${x.done ? " done" : ""}`} key={`t${i}`}>
-											<input
-												type="checkbox"
-												checked={!!x.done}
-												onChange={async () => setInbox(await window.pi.metaInboxAction(inboxCwd!, "toggleTodo", i))}
-											/>
+											<input type="checkbox" checked={!!x.done} onChange={() => inboxAction("toggleTodo", i)} />
 											<div className="body">
 												<div className="tt">{x.text}</div>
 												{srcLine(x.src.notePath, x.src.title, `${x.src.date} ${x.src.time} · ${trim(x.src.title, 26)}`)}
@@ -381,12 +390,7 @@ export function MetaVincent({ flash, onStartTodo, onOpenConfig, onChanged, refre
 														Start
 													</button>
 												)}
-												<button
-													className="mv-iconbtn"
-													title="Delete"
-													onClick={async () => setInbox(await window.pi.metaInboxAction(inboxCwd!, "deleteTodo", i))}
-													type="button"
-												>
+												<button className="mv-iconbtn" title="Delete" onClick={() => inboxAction("deleteTodo", i)} type="button">
 													<TrashIcon />
 												</button>
 											</div>
@@ -406,24 +410,10 @@ export function MetaVincent({ flash, onStartTodo, onOpenConfig, onChanged, refre
 												{srcLine(x.src.notePath, x.src.title, `${x.src.date} ${x.src.time} · ${trim(x.src.title, 26)}`)}
 											</div>
 											<div className="ops">
-												<button
-													className="mv-iconbtn"
-													title="Move to Ideas pool"
-													onClick={async () => {
-														setInbox(await window.pi.metaInboxAction(inboxCwd!, "ideaToPool", i));
-														loadIdeas();
-														onChanged();
-													}}
-													type="button"
-												>
+												<button className="mv-iconbtn" title="Move to Ideas pool" onClick={() => inboxAction("ideaToPool", i)} type="button">
 													<UndoIcon />
 												</button>
-												<button
-													className="mv-iconbtn"
-													title="Delete"
-													onClick={async () => setInbox(await window.pi.metaInboxAction(inboxCwd!, "deleteIdea", i))}
-													type="button"
-												>
+												<button className="mv-iconbtn" title="Delete" onClick={() => inboxAction("deleteIdea", i)} type="button">
 													<TrashIcon />
 												</button>
 											</div>
@@ -443,10 +433,7 @@ export function MetaVincent({ flash, onStartTodo, onOpenConfig, onChanged, refre
 												<button
 													className="mv-iconbtn"
 													title="Delete (also removes the line from AGENTS.md)"
-													onClick={async () => {
-														setInbox(await window.pi.metaInboxAction(inboxCwd!, "deleteMemory", i));
-														onChanged();
-													}}
+													onClick={() => inboxAction("deleteMemory", i)}
 													type="button"
 												>
 													<TrashIcon />
