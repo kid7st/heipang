@@ -1911,14 +1911,9 @@ select {
 }
 .mv-grid {
 	display: grid;
-	grid-template-columns: repeat(3, 1fr);
+	grid-template-columns: repeat(auto-fill, minmax(232px, 1fr));
 	gap: 12px;
 	margin-top: 16px;
-}
-@media (max-width: 1320px) {
-	.mv-grid {
-		grid-template-columns: repeat(2, 1fr);
-	}
 }
 .mv-card {
 	background: var(--bg-2);
@@ -1932,11 +1927,40 @@ select {
 .mv-card:hover {
 	border-color: var(--line2);
 }
+.mv-card .chead {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	margin-bottom: 7px;
+}
 .mv-card .date {
 	color: var(--tx3);
 	font-size: 11px;
-	margin-bottom: 7px;
+	flex: 1;
 	font-variant-numeric: tabular-nums;
+}
+.mv-note-btn {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	font-size: 10.5px;
+	color: var(--fg-faint);
+	border: 1px solid var(--border);
+	background: #fff;
+	border-radius: 6px;
+	padding: 2px 7px;
+	flex: none;
+}
+.mv-note-btn:hover {
+	color: var(--accent-2);
+	border-color: var(--accent);
+}
+.mv-note-btn svg {
+	width: 12px;
+	height: 12px;
+	stroke: currentColor;
+	fill: none;
+	stroke-width: 1.7;
 }
 .mv-card h3 {
 	font-size: 13.5px;

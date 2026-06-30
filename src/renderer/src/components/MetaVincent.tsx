@@ -3,8 +3,8 @@ import type { MetaClassification, MetaInboxItem, MetaProject, MetaProjectInbox, 
 import {
 	ArrowRightIcon,
 	CheckIcon,
-	ChevronRightIcon,
 	CloseIcon,
+	FileTextIcon,
 	MicIcon,
 	PauseIcon,
 	TargetIcon,
@@ -658,10 +658,15 @@ function Board({
 		<div className="mv-grid">
 			{rows.map((it) => (
 				<div className="mv-card" key={it.recId}>
-					<div className="date">
-						{it.date} {it.time}
+					<div className="chead">
+						<span className="date">
+							{it.date} {it.time}
+						</span>
+						<button className="mv-note-btn" title="Open the original note (Markdown)" onClick={() => onOpenNote(it.notePath)} type="button">
+							<FileTextIcon size={12} /> note
+						</button>
 					</div>
-					<h3 onClick={() => onOpenNote(it.notePath)} title="Open the recording note">
+					<h3 onClick={() => onOpenNote(it.notePath)} title="Open the original note">
 						{it.title}
 					</h3>
 					<div className="row">
