@@ -19,7 +19,6 @@ function isMetaBuild(): boolean {
 }
 
 function latestUrl(): string {
-	if (app.getName() === "SI-YOU-XIN-REN") return `${RELEASE_FEED_BASE}/si-latest.json`;
 	if (isMetaBuild()) return `${RELEASE_FEED_BASE}/meta-latest.json`;
 	return `${RELEASE_FEED_BASE}/heipang-latest.json`;
 }
