@@ -94,6 +94,11 @@ export interface RemoteModel {
 	display_name: string;
 	created_at?: string;
 	alreadyAdded: boolean;
+	// Populated by the OpenAI fetch so selected models keep their catalog wiring.
+	provider?: string;
+	reasoning?: boolean;
+	contextWindow?: number;
+	maxTokens?: number;
 }
 
 export interface NewModelInput {
@@ -315,6 +320,7 @@ export interface PiApi {
 	addModels(models: NewModelInput[]): Promise<ModelsPayload>;
 	removeModel(provider: string, id: string): Promise<ModelsPayload>;
 	fetchRemoteModels(): Promise<{ ok: boolean; models?: RemoteModel[]; error?: string }>;
+	fetchRemoteOpenAIModels(): Promise<{ ok: boolean; models?: RemoteModel[]; error?: string }>;
 	setEnabledModels(enabled: string[]): Promise<ModelsPayload>;
 	setDefaultModel(provider: string, id: string): Promise<ModelsPayload>;
 	// sessions

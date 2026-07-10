@@ -10,6 +10,7 @@ export function ModelManager({
 	onChanged: (next: ModelsPayload) => void;
 }) {
 	const [remote, setRemote] = useState<RemoteModel[] | null>(null);
+	const [remoteProvider, setRemoteProvider] = useState<"anthropic" | "openai-codex">("anthropic");
 	const [remoteSel, setRemoteSel] = useState<Set<string>>(new Set());
 	const [busy, setBusy] = useState(false);
 	const [err, setErr] = useState<string | null>(null);
@@ -25,15 +26,16 @@ export function ModelManager({
 	// Active = the models actually offered in the dropdown (enabled set).
 	const active = models.all.filter((m) => enabledSet.has(`${m.provider}/${m.id}`));
 
-	const fetchRemote = async () => {
+	const fetchRemote = async (provider: "anthropic" | "openai-codex") => {
 		setBusy(true);
 		setErr(null);
-		const res = await window.pi.fetchRemoteModels();
+		const res = provider === "openai-codex" ? await window.pi.fetchRemoteOpenAIModels() : await window.pi.fetchRemoteModels();
 		setBusy(false);
 		if (!res.ok) {
 			setErr(res.error || "Failed to fetch models");
 			return;
 		}
+		setRemoteProvider(provider);
 		setRemote(res.models || []);
 		setRemoteSel(new Set());
 	};
@@ -52,7 +54,14 @@ export function ModelManager({
 		if (picks.length === 0) return;
 		setBusy(true);
 		await addAndEnable(
-			picks.map((m) => ({ provider: "anthropic", id: m.id, name: m.display_name || m.id, reasoning: true, contextWindow: 1000000, maxTokens: 128000 })),
+			picks.map((m) => ({
+				provider: m.provider || remoteProvider,
+				id: m.id,
+				name: m.display_name || m.id,
+				reasoning: m.reasoning ?? true,
+				contextWindow: m.contextWindow ?? (remoteProvider === "openai-codex" ? 272000 : 1000000),
+				maxTokens: m.maxTokens ?? 128000,
+			})),
 		);
 		setBusy(false);
 		setRemote((r) => r?.map((x) => (remoteSel.has(x.id) ? { ...x, alreadyAdded: true } : x)) ?? null);
@@ -115,8 +124,11 @@ export function ModelManager({
 
 			<div className="section-title" style={{ marginTop: 18 }}>
 				Add models
-				<button className="btn btn-sm" onClick={fetchRemote} disabled={busy} type="button">
+				<button className="btn btn-sm" onClick={() => fetchRemote("anthropic")} disabled={busy} type="button">
 					{busy ? "…" : "Fetch from Anthropic"}
+				</button>
+				<button className="btn btn-sm" onClick={() => fetchRemote("openai-codex")} disabled={busy} type="button">
+					{busy ? "…" : "Fetch from OpenAI"}
 				</button>
 				<button className="btn btn-sm" onClick={() => setShowAdd((s) => !s)} type="button">
 					{showAdd ? "Cancel" : "Add by ID"}

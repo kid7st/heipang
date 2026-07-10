@@ -12,7 +12,7 @@ import {
 	SessionManager,
 	SettingsManager,
 } from "@mariozechner/pi-coding-agent";
-import { completeSimple, type Model } from "@mariozechner/pi-ai";
+import { completeSimple, getModels, type Model } from "@mariozechner/pi-ai";
 import type {
 	AccountInfo,
 	ActiveState,
@@ -367,6 +367,30 @@ export class Driver {
 				display_name: d.display_name ?? d.id,
 				created_at: d.created_at,
 				alreadyAdded: existing.has(d.id),
+			}));
+			return { ok: true, models };
+		} catch (err) {
+			return { ok: false, error: err instanceof Error ? err.message : String(err) };
+		}
+	}
+
+	/** List OpenAI (ChatGPT/Codex) models from pi-ai's bundled catalog. Mirrors
+	 * the Anthropic fetch UX; the ChatGPT backend has no reliable public model-
+	 * list endpoint, so the source is the catalog shipped with the installed
+	 * pi-ai version (grows when pi-ai is updated). */
+	async fetchRemoteOpenAIModels(): Promise<{ ok: boolean; models?: RemoteModel[]; error?: string }> {
+		try {
+			const catalog = getModels("openai-codex") as AnyModel[];
+			if (!catalog || catalog.length === 0) return { ok: false, error: "No OpenAI models in catalog (try updating pi)" };
+			const existing = new Set(this.modelRegistry.getAll().filter((m) => m.provider === "openai-codex").map((m) => m.id));
+			const models: RemoteModel[] = catalog.map((m) => ({
+				id: m.id,
+				display_name: m.name ?? m.id,
+				provider: "openai-codex",
+				reasoning: !!m.reasoning,
+				contextWindow: m.contextWindow,
+				maxTokens: m.maxTokens,
+				alreadyAdded: existing.has(m.id),
 			}));
 			return { ok: true, models };
 		} catch (err) {
