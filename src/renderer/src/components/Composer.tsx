@@ -19,7 +19,12 @@ const TEXT_EXTS = new Set([
 	"css", "js", "jsx", "ts", "tsx", "py", "rb", "go", "rs", "java", "c", "h", "cpp", "cc",
 	"sh", "bash", "zsh", "sql", "toml", "ini", "env", "log", "svg", "vue", "php", "kt", "swift",
 ]);
-const MAX_TEXT_BYTES = 512 * 1024;
+// No arbitrary small cap: dropped text is inlined into the prompt, so the real
+// ceiling is the model's context window (the API rejects anything too big).
+// MAX_TEXT_BYTES is only a safety valve so a giant file can't freeze the UI.
+// LARGE_TEXT_BYTES just triggers a heads-up that it may exceed the context.
+const MAX_TEXT_BYTES = 25 * 1024 * 1024;
+const LARGE_TEXT_BYTES = 1 * 1024 * 1024;
 
 function extOf(name: string): string {
 	const i = name.lastIndexOf(".");
@@ -167,22 +172,51 @@ export function Composer({
 		if (ok.length) setAtts((a) => [...a, ...ok]);
 	};
 
-	// Dropped files: images/PDFs become attachments, text/JSON files are embedded
-	// into the message body. Folders and unsupported binaries are ignored.
-	const addDropped = async (files: File[]) => {
+	// Transient hint under the composer so unsupported/oversized files no longer
+	// fail silently (this is why HTML drops "did nothing").
+	const [notice, setNotice] = useState<string | null>(null);
+	const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+	const flashNotice = (msg: string) => {
+		setNotice(msg);
+		if (noticeTimer.current) clearTimeout(noticeTimer.current);
+		noticeTimer.current = setTimeout(() => setNotice(null), 4500);
+	};
+
+	// Shared intake for both the + button and drag-drop: images/PDFs become
+	// attachments; text/code/HTML files are embedded into the message body.
+	// Oversized or unsupported files surface a notice instead of disappearing.
+	const intake = async (files: File[]) => {
 		const attachments = files.filter(looksLikeAttachment);
 		const texts = files.filter((f) => !looksLikeAttachment(f) && looksLikeText(f));
+		const skipped = files.filter((f) => !looksLikeAttachment(f) && !looksLikeText(f));
 		if (attachments.length) await addFiles(attachments);
+		const inserted: string[] = [];
+		let anyLarge = false;
 		for (const f of texts) {
+			if (f.size > MAX_TEXT_BYTES) {
+				flashNotice(`${f.name} 过大（${(f.size / 1048576).toFixed(1)}MB），超过 ${(MAX_TEXT_BYTES / 1048576).toFixed(0)}MB 安全上限，未插入`);
+				continue;
+			}
 			const content = await readTextFile(f);
-			if (content == null) continue;
+			if (content == null) {
+				flashNotice(`${f.name} 读取失败`);
+				continue;
+			}
 			const block = `\n\n${f.name}\n\`\`\`${extOf(f.name)}\n${content}\n\`\`\`\n`;
 			setText((t) => t + block);
+			inserted.push(f.name);
+			if (f.size > LARGE_TEXT_BYTES) anyLarge = true;
 		}
+		if (inserted.length) {
+			flashNotice(
+				`已作为文本插入：${inserted.join("、")}${anyLarge ? "（内容较大，可能超出模型上下文而被模型端报错）" : ""}`,
+			);
+		}
+		if (skipped.length) flashNotice(`不支持的文件已忽略：${skipped.map((f) => f.name).join("、")}`);
 	};
 	// Keep the latest handler reachable from the once-bound window listeners.
-	const droppedRef = useRef(addDropped);
-	droppedRef.current = addDropped;
+	const droppedRef = useRef(intake);
+	droppedRef.current = intake;
 
 	// Accept drops anywhere in the window. Electron would otherwise navigate the
 	// page to the dropped file, which is why drag-drop appeared to do nothing.
@@ -327,19 +361,23 @@ export function Composer({
 				</div>
 			)}
 
+			{notice && (
+				<div style={{ padding: "4px 12px", fontSize: 12, color: "var(--mut, #8a8f98)" }}>{notice}</div>
+			)}
+
 			<div className="composer">
 				<input
 					ref={fileRef}
 					type="file"
-					accept="image/*,application/pdf,.pdf"
+					accept="image/*,application/pdf,.pdf,text/*,.txt,.md,.markdown,.json,.jsonl,.csv,.tsv,.yaml,.yml,.xml,.html,.htm,.css,.js,.jsx,.ts,.tsx,.py,.svg,.log,.sql,.toml,.ini,.env,.vue"
 					multiple
 					style={{ display: "none" }}
 					onChange={(e) => {
-						if (e.target.files) addFiles(e.target.files);
+						if (e.target.files) intake(Array.from(e.target.files));
 						e.target.value = "";
 					}}
 				/>
-				<button className="attach-btn" onClick={() => fileRef.current?.click()} title="Attach image or PDF" type="button" disabled={disabled}>
+				<button className="attach-btn" onClick={() => fileRef.current?.click()} title="附件：图片 / PDF / 文本·HTML·代码" type="button" disabled={disabled}>
 					<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
 						<path d="M12 5v14M5 12h14" />
 					</svg>
@@ -347,7 +385,7 @@ export function Composer({
 				<textarea
 					ref={taRef}
 					className="composer-input"
-					placeholder={disabled ? "Loading…" : "Message…  ( / for commands · paste/drop or + to attach images/PDFs )"}
+					placeholder={disabled ? "Loading…" : "Message…  ( / 命令 · 粘贴/拖拽或 + 添加图片·PDF·文本·HTML )"}
 					value={text}
 					disabled={disabled}
 					onChange={(e) => {
