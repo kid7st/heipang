@@ -1,9 +1,10 @@
-name: Build HEIPANG Meta (Windows)
+name: Build HEIPANG Meta
 
-# Builds the HEIPANG Meta Windows NSIS installer and uploads it as a workflow
-# artifact. Publishing to the public heipang-releases repo is done separately
-# (maintainer runs `gh release upload meta-latest ...`), so no cross-repo token
-# is needed here.
+# Builds the HEIPANG Meta installers (Windows NSIS + macOS arm64 dmg) and
+# uploads them as workflow artifacts. Publishing to the public heipang-releases
+# repo is done separately (maintainer runs `gh release upload meta-latest ...`),
+# so no cross-repo token is needed here. Runs on GitHub's network to avoid local
+# flaky downloads.
 on:
   workflow_dispatch: {}
   push:
@@ -15,24 +16,39 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-
       - name: Install dependencies
         run: npm install --no-audit --no-fund
-
       - name: Build + package HEIPANG Meta (NSIS x64)
         run: npm run pack:meta:win -- --publish never
-
       - name: List artifacts
         shell: bash
         run: ls -la release-meta || dir release-meta
-
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:
-          name: HEIPANG-Meta-Setup
+          name: HEIPANG-Meta-Setup-exe
           path: release-meta/*.exe
+          if-no-files-found: error
+
+  mac:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+      - name: Build + package HEIPANG Meta (dmg arm64)
+        run: npm run pack:meta:mac -- --publish never
+      - name: List artifacts
+        run: ls -la release-meta || true
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: HEIPANG-Meta-arm64-dmg
+          path: release-meta/*.dmg
           if-no-files-found: error
