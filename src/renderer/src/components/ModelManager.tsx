@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { ModelsPayload, NewModelInput, RemoteModel } from "../../../shared/types";
 
 /** Embeddable model management (rendered inside Settings → Models). */
@@ -38,6 +38,21 @@ export function ModelManager({
 		setRemoteProvider(provider);
 		setRemote(res.models || []);
 		setRemoteSel(new Set());
+	};
+
+	// Auto-pull the latest models when the Models tab opens, so recent models are
+	// just there (Anthropic is a live account list; OpenAI merges the catalog).
+	useEffect(() => {
+		void fetchRemote("anthropic");
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, []);
+
+	const refreshLatest = async () => {
+		setBusy(true);
+		setErr(null);
+		await window.pi.refreshModelCatalog();
+		setBusy(false);
+		await fetchRemote(remoteProvider);
 	};
 
 	const addAndEnable = async (inputs: NewModelInput[]) => {
@@ -130,6 +145,9 @@ export function ModelManager({
 				<button className="btn btn-sm" onClick={() => fetchRemote("openai-codex")} disabled={busy} type="button">
 					{busy ? "…" : "Fetch from OpenAI"}
 				</button>
+				<button className="btn btn-sm" onClick={refreshLatest} disabled={busy} title="Re-pull the latest-models catalog now" type="button">
+					{busy ? "…" : "Refresh latest"}
+				</button>
 				<button className="btn btn-sm" onClick={() => setShowAdd((s) => !s)} type="button">
 					{showAdd ? "Cancel" : "Add by ID"}
 				</button>
@@ -173,6 +191,7 @@ export function ModelManager({
 								/>
 								<span className="model-name">{m.display_name}</span>
 								<span className="model-id">{m.id}</span>
+								{m.contextWindow ? <span className="model-date">{Math.round(m.contextWindow / 1000)}k ctx</span> : null}
 								{m.created_at && <span className="model-date">{m.created_at.slice(0, 10)}</span>}
 								{m.alreadyAdded && <span className="badge added">added</span>}
 							</label>

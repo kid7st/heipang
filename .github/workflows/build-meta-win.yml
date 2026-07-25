@@ -1,0 +1,38 @@
+name: Build HEIPANG Meta (Windows)
+
+# Builds the HEIPANG Meta Windows NSIS installer and uploads it as a workflow
+# artifact. Publishing to the public heipang-releases repo is done separately
+# (maintainer runs `gh release upload meta-latest ...`), so no cross-repo token
+# is needed here.
+on:
+  workflow_dispatch: {}
+  push:
+    tags:
+      - "meta-v*"
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Build + package HEIPANG Meta (NSIS x64)
+        run: npm run pack:meta:win -- --publish never
+
+      - name: List artifacts
+        shell: bash
+        run: ls -la release-meta || dir release-meta
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: HEIPANG-Meta-Setup
+          path: release-meta/*.exe
+          if-no-files-found: error

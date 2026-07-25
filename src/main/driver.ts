@@ -77,6 +77,51 @@ function capTitle(s: string): string {
 
 type AnyModel = Model<any>;
 
+// ---- Model recency + remote "latest models" catalog ---------------------
+// Users shouldn't hand-manage models. We surface only "recent" models
+// (Anthropic >= 4.7, OpenAI >= 5.5) and pull the newest ones from a small
+// remote catalog that refreshes on a weekly cadence (providers ship new models
+// roughly quarterly), so a new model shows up within a week with no reinstall
+// and with a correct context window.
+interface CatalogModel {
+	provider: string;
+	id: string;
+	name?: string;
+	reasoning?: boolean;
+	contextWindow?: number;
+	maxTokens?: number;
+}
+const ANTHROPIC_FLOOR: [number, number] = [4, 7];
+const OPENAI_FLOOR: [number, number] = [5, 5];
+function anthropicVer(id: string): [number, number] {
+	const s = id.replace(/^claude-/, "").replace(/-\d{8}$/, "").replace(/-latest$/, "");
+	const nums = (s.match(/\d+/g) ?? []).map(Number);
+	if (nums.length === 0) return [99, 0]; // unknown/new family → treat as newest
+	return [nums[0], nums[1] ?? 0];
+}
+function openaiVer(id: string): [number, number] {
+	const m = id.match(/gpt-(\d+)(?:\.(\d+))?/i);
+	if (!m) return [99, 0];
+	return [Number(m[1]), Number(m[2] ?? 0)];
+}
+function verGte(v: [number, number], floor: [number, number]): boolean {
+	return v[0] > floor[0] || (v[0] === floor[0] && v[1] >= floor[1]);
+}
+function verCmpDesc(a: [number, number], b: [number, number]): number {
+	return b[0] - a[0] || b[1] - a[1];
+}
+function isRecentAnthropic(id: string): boolean {
+	return verGte(anthropicVer(id), ANTHROPIC_FLOOR);
+}
+function isRecentOpenAI(id: string): boolean {
+	return verGte(openaiVer(id), OPENAI_FLOOR);
+}
+function anthropicDefaultCtx(id: string): number {
+	const [maj, min] = anthropicVer(id);
+	if (/opus|sonnet/.test(id) && (maj > 4 || (maj === 4 && min >= 6))) return 1_000_000;
+	return 200_000;
+}
+
 /**
  * Owns all pi SDK state in the main process. One driver per app.
  * Heavy work (parsing big session files, registry refresh) happens here so the
@@ -138,6 +183,13 @@ export class Driver {
 	private static readonly GUI_RETRY_MAX = 3;
 	private static readonly GUI_RETRY_BASE_DELAY_MS = 2500;
 
+	// Remote "latest models" catalog (weekly stale-while-revalidate refresh).
+	private catalogMem?: { fetchedAt: number; models: CatalogModel[] };
+	private catalogInflight?: Promise<CatalogModel[]>;
+	private static readonly CATALOG_TTL = 7 * 24 * 60 * 60 * 1000;
+	private static readonly CATALOG_URL =
+		"https://raw.githubusercontent.com/kuaai/heipang-releases/main/models-catalog.json";
+
 	constructor() {
 		this.agentDir = getAgentDir();
 		const authPath = join(this.agentDir, "auth.json");
@@ -151,6 +203,7 @@ export class Driver {
 			settingsManager: this.settings,
 		});
 		this.guiSettings = this.loadGuiSettings();
+		void this.loadCatalog().catch(() => {}); // warm the latest-models cache on startup
 	}
 
 	setHandlers(handlers: {
@@ -344,7 +397,76 @@ export class Driver {
 		return this.listModels();
 	}
 
-	/** R2: hit Anthropic OAuth /v1/models to list account-available model IDs. */
+	// -------- Remote model catalog (weekly-refreshed "latest models") --------
+
+	private catalogCachePath(): string {
+		return join(this.agentDir, "models-catalog.cache.json");
+	}
+	private readCatalogCache(): { fetchedAt: number; models: CatalogModel[] } | null {
+		if (this.catalogMem) return this.catalogMem;
+		try {
+			const d = JSON.parse(readFileSync(this.catalogCachePath(), "utf8"));
+			if (d && Array.isArray(d.models)) {
+				this.catalogMem = { fetchedAt: Number(d.fetchedAt) || 0, models: d.models };
+				return this.catalogMem;
+			}
+		} catch {
+			/* no cache yet */
+		}
+		return null;
+	}
+	private async fetchCatalogRemote(): Promise<CatalogModel[]> {
+		const res = await fetch(`${Driver.CATALOG_URL}?t=${Date.now()}`, { cache: "no-store" } as any);
+		if (!res.ok) throw new Error(`HTTP ${res.status}`);
+		const json: any = await res.json();
+		const models: CatalogModel[] = Array.isArray(json?.models)
+			? json.models.filter((m: any) => m && typeof m.provider === "string" && typeof m.id === "string")
+			: [];
+		const rec = { fetchedAt: Date.now(), models };
+		this.catalogMem = rec;
+		try {
+			writeFileSync(this.catalogCachePath(), `${JSON.stringify(rec, null, 2)}\n`, "utf8");
+		} catch {
+			/* ignore */
+		}
+		return models;
+	}
+	/** Latest-model catalog. Serves cache instantly and refreshes in the
+	 * background when older than a week (providers ship models ~quarterly), so
+	 * new models arrive with no reinstall. `force` awaits a fresh pull. */
+	async loadCatalog(force = false): Promise<CatalogModel[]> {
+		const cache = this.readCatalogCache();
+		const fresh = cache && Date.now() - cache.fetchedAt < Driver.CATALOG_TTL;
+		if (fresh && !force) return cache!.models;
+		const doFetch = () => {
+			if (!this.catalogInflight) {
+				this.catalogInflight = this.fetchCatalogRemote().finally(() => {
+					this.catalogInflight = undefined;
+				});
+			}
+			return this.catalogInflight;
+		};
+		if (cache && !force) {
+			doFetch().catch(() => {}); // stale-while-revalidate
+			return cache.models;
+		}
+		try {
+			return await doFetch();
+		} catch {
+			return cache?.models ?? [];
+		}
+	}
+	async refreshModelCatalog(): Promise<{ ok: boolean; count?: number; error?: string }> {
+		try {
+			const models = await this.loadCatalog(true);
+			return { ok: true, count: models.length };
+		} catch (err) {
+			return { ok: false, error: err instanceof Error ? err.message : String(err) };
+		}
+	}
+
+	/** Anthropic: live account model list (/v1/models), limited to recent models
+	 * (>= 4.7) and enriched with context windows from the remote catalog. */
 	async fetchRemoteModels(): Promise<{ ok: boolean; models?: RemoteModel[]; error?: string }> {
 		try {
 			const token = await this.authStorage.getApiKey("anthropic");
@@ -361,37 +483,76 @@ export class Driver {
 				return { ok: false, error: `HTTP ${res.status}: ${body.slice(0, 300)}` };
 			}
 			const json = (await res.json()) as { data?: Array<{ id: string; display_name?: string; created_at?: string }> };
-			const existing = new Set(this.modelRegistry.getAll().filter((m) => m.provider === "anthropic").map((m) => m.id));
-			const models: RemoteModel[] = (json.data ?? []).map((d) => ({
-				id: d.id,
-				display_name: d.display_name ?? d.id,
-				created_at: d.created_at,
-				alreadyAdded: existing.has(d.id),
-			}));
+			const catalog = await this.loadCatalog();
+			const cat = new Map(catalog.filter((c) => c.provider === "anthropic").map((c) => [c.id, c] as const));
+			const existing = new Set(
+				this.modelRegistry.getAll().filter((m) => m.provider === "anthropic").map((m) => m.id),
+			);
+			const models: RemoteModel[] = (json.data ?? [])
+				.filter((d) => isRecentAnthropic(d.id))
+				.map((d) => {
+					const c = cat.get(d.id);
+					return {
+						id: d.id,
+						display_name: d.display_name ?? d.id,
+						created_at: d.created_at,
+						provider: "anthropic",
+						reasoning: c?.reasoning ?? true,
+						contextWindow: c?.contextWindow ?? anthropicDefaultCtx(d.id),
+						maxTokens: c?.maxTokens ?? 128000,
+						alreadyAdded: existing.has(d.id),
+					};
+				})
+				.sort(
+					(a, b) =>
+						(b.created_at ?? "").localeCompare(a.created_at ?? "") ||
+						verCmpDesc(anthropicVer(a.id), anthropicVer(b.id)),
+				);
 			return { ok: true, models };
 		} catch (err) {
 			return { ok: false, error: err instanceof Error ? err.message : String(err) };
 		}
 	}
 
-	/** List OpenAI (ChatGPT/Codex) models from pi-ai's bundled catalog. Mirrors
-	 * the Anthropic fetch UX; the ChatGPT backend has no reliable public model-
-	 * list endpoint, so the source is the catalog shipped with the installed
-	 * pi-ai version (grows when pi-ai is updated). */
+	/** OpenAI (ChatGPT/Codex): the backend has no public model-list endpoint, so
+	 * we merge pi-ai's bundled catalog with the remote catalog (which carries the
+	 * newest models + correct context windows), limited to recent models (>= 5.5). */
 	async fetchRemoteOpenAIModels(): Promise<{ ok: boolean; models?: RemoteModel[]; error?: string }> {
 		try {
-			const catalog = getModels("openai-codex") as AnyModel[];
-			if (!catalog || catalog.length === 0) return { ok: false, error: "No OpenAI models in catalog (try updating pi)" };
-			const existing = new Set(this.modelRegistry.getAll().filter((m) => m.provider === "openai-codex").map((m) => m.id));
-			const models: RemoteModel[] = catalog.map((m) => ({
-				id: m.id,
-				display_name: m.name ?? m.id,
-				provider: "openai-codex",
-				reasoning: !!m.reasoning,
-				contextWindow: m.contextWindow,
-				maxTokens: m.maxTokens,
-				alreadyAdded: existing.has(m.id),
-			}));
+			const catalog = await this.loadCatalog();
+			const bundled = (getModels("openai-codex") as AnyModel[]) ?? [];
+			const map = new Map<string, RemoteModel>();
+			for (const m of bundled) {
+				map.set(m.id, {
+					id: m.id,
+					display_name: m.name ?? m.id,
+					provider: "openai-codex",
+					reasoning: !!m.reasoning,
+					contextWindow: m.contextWindow,
+					maxTokens: m.maxTokens,
+					alreadyAdded: false,
+				});
+			}
+			for (const c of catalog) {
+				if (c.provider !== "openai-codex") continue;
+				map.set(c.id, {
+					id: c.id,
+					display_name: c.name ?? c.id,
+					provider: "openai-codex",
+					reasoning: c.reasoning ?? true,
+					contextWindow: c.contextWindow ?? 272000,
+					maxTokens: c.maxTokens ?? 128000,
+					alreadyAdded: false,
+				});
+			}
+			const existing = new Set(
+				this.modelRegistry.getAll().filter((m) => m.provider === "openai-codex").map((m) => m.id),
+			);
+			const models: RemoteModel[] = [...map.values()]
+				.filter((m) => isRecentOpenAI(m.id))
+				.map((m) => ({ ...m, alreadyAdded: existing.has(m.id) }))
+				.sort((a, b) => verCmpDesc(openaiVer(a.id), openaiVer(b.id)) || a.id.localeCompare(b.id));
+			if (models.length === 0) return { ok: false, error: "No recent OpenAI models found (try Refresh)" };
 			return { ok: true, models };
 		} catch (err) {
 			return { ok: false, error: err instanceof Error ? err.message : String(err) };

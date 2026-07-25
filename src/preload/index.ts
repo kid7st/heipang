@@ -7,6 +7,7 @@ const api: PiApi = {
 	removeModel: (provider, id) => ipcRenderer.invoke("pi:removeModel", provider, id),
 	fetchRemoteModels: () => ipcRenderer.invoke("pi:fetchRemoteModels"),
 	fetchRemoteOpenAIModels: () => ipcRenderer.invoke("pi:fetchRemoteOpenAIModels"),
+	refreshModelCatalog: () => ipcRenderer.invoke("pi:refreshModelCatalog"),
 	setEnabledModels: (enabled) => ipcRenderer.invoke("pi:setEnabledModels", enabled),
 	setDefaultModel: (provider, id) => ipcRenderer.invoke("pi:setDefaultModel", provider, id),
 
