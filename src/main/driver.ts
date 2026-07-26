@@ -485,9 +485,10 @@ export class Driver {
 			const json = (await res.json()) as { data?: Array<{ id: string; display_name?: string; created_at?: string }> };
 			const catalog = await this.loadCatalog();
 			const cat = new Map(catalog.filter((c) => c.provider === "anthropic").map((c) => [c.id, c] as const));
-			const existing = new Set(
-				this.modelRegistry.getAll().filter((m) => m.provider === "anthropic").map((m) => m.id),
-			);
+			// "Already added" = already ENABLED (in the chat dropdown), not merely
+			// present in the registry/bundled catalog — otherwise bundled models can
+			// never be enabled from here (their checkbox would be disabled).
+			const enabled = new Set(this.settings.getEnabledModels() ?? []);
 			const models: RemoteModel[] = (json.data ?? [])
 				.filter((d) => isRecentAnthropic(d.id))
 				.map((d) => {
@@ -500,7 +501,7 @@ export class Driver {
 						reasoning: c?.reasoning ?? true,
 						contextWindow: c?.contextWindow ?? anthropicDefaultCtx(d.id),
 						maxTokens: c?.maxTokens ?? 128000,
-						alreadyAdded: existing.has(d.id),
+						alreadyAdded: enabled.has(`anthropic/${d.id}`),
 					};
 				})
 				.sort(
@@ -545,12 +546,12 @@ export class Driver {
 					alreadyAdded: false,
 				});
 			}
-			const existing = new Set(
-				this.modelRegistry.getAll().filter((m) => m.provider === "openai-codex").map((m) => m.id),
-			);
+			// "Already added" = already ENABLED (see the Anthropic method) so bundled
+			// models (e.g. gpt-5.5) stay selectable until you actually enable them.
+			const enabled = new Set(this.settings.getEnabledModels() ?? []);
 			const models: RemoteModel[] = [...map.values()]
 				.filter((m) => isRecentOpenAI(m.id))
-				.map((m) => ({ ...m, alreadyAdded: existing.has(m.id) }))
+				.map((m) => ({ ...m, alreadyAdded: enabled.has(`openai-codex/${m.id}`) }))
 				.sort((a, b) => verCmpDesc(openaiVer(a.id), openaiVer(b.id)) || a.id.localeCompare(b.id));
 			if (models.length === 0) return { ok: false, error: "No recent OpenAI models found (try Refresh)" };
 			return { ok: true, models };
