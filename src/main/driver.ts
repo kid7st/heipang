@@ -1,6 +1,8 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
+import { nativeImage } from "electron";
+import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import {
 	AgentSession,
 	AuthStorage,
@@ -76,6 +78,54 @@ function capTitle(s: string): string {
 }
 
 type AnyModel = Model<any>;
+
+// Anthropic allows larger dimensions for ordinary requests, but once the
+// context contains more than 20 images every image must fit inside 2000×2000.
+// Resize only the request copy so historical sessions keep their originals.
+const MANY_IMAGE_THRESHOLD = 20;
+const MANY_IMAGE_MAX_PX = 2000;
+
+function guardManyImageContext(messages: AgentMessage[]): AgentMessage[] {
+	let imageCount = 0;
+	for (const message of messages) {
+		const content = (message as any).content;
+		if (!Array.isArray(content)) continue;
+		imageCount += content.filter((block: any) => block?.type === "image" && /^image\//.test(block.mimeType || "")).length;
+	}
+	if (imageCount <= MANY_IMAGE_THRESHOLD) return messages;
+
+	return messages.map((message) => {
+		const content = (message as any).content;
+		if (!Array.isArray(content)) return message;
+		let changed = false;
+		const guarded = content.map((block: any) => {
+			if (block?.type !== "image" || typeof block.data !== "string" || !/^image\//.test(block.mimeType || "")) return block;
+			try {
+				const image = nativeImage.createFromBuffer(Buffer.from(block.data, "base64"));
+				if (image.isEmpty()) return block;
+				const { width, height } = image.getSize();
+				const longest = Math.max(width, height);
+				if (longest <= MANY_IMAGE_MAX_PX) return block;
+				const scale = MANY_IMAGE_MAX_PX / longest;
+				const resized = image.resize({
+					width: Math.max(1, Math.floor(width * scale)),
+					height: Math.max(1, Math.floor(height * scale)),
+					quality: "best",
+				});
+				const jpeg = block.mimeType === "image/jpeg";
+				changed = true;
+				return {
+					...block,
+					data: (jpeg ? resized.toJPEG(90) : resized.toPNG()).toString("base64"),
+					mimeType: jpeg ? "image/jpeg" : "image/png",
+				};
+			} catch {
+				return block;
+			}
+		});
+		return changed ? ({ ...message, content: guarded } as AgentMessage) : message;
+	});
+}
 
 // ---- Model recency + remote "latest models" catalog ---------------------
 // Users shouldn't hand-manage models. We surface only "recent" models
@@ -1396,6 +1446,7 @@ export class Driver {
 			resourceLoader: this.resourceLoader,
 			sessionManager,
 		});
+		this.installManyImageGuard(session);
 		this.session = session;
 		this.activeCwd = sessionManager.getCwd();
 		this.wireSession();
@@ -1404,6 +1455,14 @@ export class Driver {
 		const messages = this.getMessages();
 		this.sentUiCount = messages.length;
 		return { state: this.getActiveState()!, messages, modelFallbackMessage };
+	}
+
+	private installManyImageGuard(session: AgentSession): void {
+		const previousTransform = session.agent.transformContext;
+		session.agent.transformContext = async (messages, signal) => {
+			const transformed = previousTransform ? await previousTransform(messages, signal) : messages;
+			return guardManyImageContext(transformed);
+		};
 	}
 
 	async newSession(cwd?: string): Promise<OpenSessionResult> {
@@ -1417,6 +1476,7 @@ export class Driver {
 			settingsManager: this.settings,
 			resourceLoader: this.resourceLoader,
 		});
+		this.installManyImageGuard(session);
 		this.session = session;
 		this.activeCwd = workdir;
 		this.wireSession();
