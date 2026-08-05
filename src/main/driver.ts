@@ -79,49 +79,82 @@ function capTitle(s: string): string {
 
 type AnyModel = Model<any>;
 
-// Anthropic allows larger dimensions for ordinary requests, but once the
-// context contains more than 20 images every image must fit inside 2000×2000.
-// Resize only the request copy so historical sessions keep their originals.
+// Anthropic's API accepts at most 100 images per request. Above 20 images it
+// additionally requires every image to fit inside 2000×2000. A separate HTTP
+// body limit (base64 included) can still cause 413, so keep the *whole image
+// payload* inside a safe budget and adapt compression to the actual image count.
+// Only request copies are changed; session files retain the original images.
 const MANY_IMAGE_THRESHOLD = 20;
 const MANY_IMAGE_MAX_PX = 2000;
+const IMAGE_PAYLOAD_BASE64_BUDGET = 16 * 1024 * 1024;
+
+function fitImageForRequest(block: any, targetBase64Chars: number, maxPx: number): any {
+	try {
+		const source = nativeImage.createFromBuffer(Buffer.from(block.data, "base64"));
+		if (source.isEmpty()) return block;
+		const { width, height } = source.getSize();
+		const longest = Math.max(width, height);
+		if (longest <= maxPx && block.data.length <= targetBase64Chars) return block;
+
+		// OCR benefits more from pixel dimensions than pristine JPEG quality. Try
+		// progressively smaller dimensions while keeping useful text detail.
+		const dimensionSteps = [maxPx, 1800, 1600, 1400, 1200, 1000, 800]
+			.filter((n, i, a) => n <= maxPx && n <= longest && a.indexOf(n) === i);
+		if (dimensionSteps.length === 0) dimensionSteps.push(Math.min(maxPx, longest));
+		const qualitySteps = [86, 76, 66, 56, 46];
+		let smallest: Buffer | undefined;
+
+		for (const longestTarget of dimensionSteps) {
+			const scale = Math.min(1, longestTarget / longest);
+			const candidate = scale < 1
+				? source.resize({
+						width: Math.max(1, Math.floor(width * scale)),
+						height: Math.max(1, Math.floor(height * scale)),
+						quality: "best",
+					})
+				: source;
+			for (const quality of qualitySteps) {
+				const encoded = candidate.toJPEG(quality);
+				if (!smallest || encoded.length < smallest.length) smallest = encoded;
+				if (Math.ceil(encoded.length / 3) * 4 <= targetBase64Chars) {
+					return { ...block, data: encoded.toString("base64"), mimeType: "image/jpeg" };
+				}
+			}
+		}
+
+		return smallest ? { ...block, data: smallest.toString("base64"), mimeType: "image/jpeg" } : block;
+	} catch {
+		return block;
+	}
+}
 
 function guardManyImageContext(messages: AgentMessage[]): AgentMessage[] {
 	let imageCount = 0;
+	let totalBase64Chars = 0;
 	for (const message of messages) {
 		const content = (message as any).content;
 		if (!Array.isArray(content)) continue;
-		imageCount += content.filter((block: any) => block?.type === "image" && /^image\//.test(block.mimeType || "")).length;
+		for (const block of content) {
+			if (block?.type !== "image" || typeof block.data !== "string" || !/^image\//.test(block.mimeType || "")) continue;
+			imageCount++;
+			totalBase64Chars += block.data.length;
+		}
 	}
-	if (imageCount <= MANY_IMAGE_THRESHOLD) return messages;
+	if (imageCount === 0) return messages;
+	const manyImages = imageCount > MANY_IMAGE_THRESHOLD;
+	if (!manyImages && totalBase64Chars <= IMAGE_PAYLOAD_BASE64_BUDGET) return messages;
 
+	const targetPerImage = Math.max(64 * 1024, Math.floor(IMAGE_PAYLOAD_BASE64_BUDGET / imageCount));
+	const maxPx = manyImages ? MANY_IMAGE_MAX_PX : 8000;
 	return messages.map((message) => {
 		const content = (message as any).content;
 		if (!Array.isArray(content)) return message;
 		let changed = false;
 		const guarded = content.map((block: any) => {
 			if (block?.type !== "image" || typeof block.data !== "string" || !/^image\//.test(block.mimeType || "")) return block;
-			try {
-				const image = nativeImage.createFromBuffer(Buffer.from(block.data, "base64"));
-				if (image.isEmpty()) return block;
-				const { width, height } = image.getSize();
-				const longest = Math.max(width, height);
-				if (longest <= MANY_IMAGE_MAX_PX) return block;
-				const scale = MANY_IMAGE_MAX_PX / longest;
-				const resized = image.resize({
-					width: Math.max(1, Math.floor(width * scale)),
-					height: Math.max(1, Math.floor(height * scale)),
-					quality: "best",
-				});
-				const jpeg = block.mimeType === "image/jpeg";
-				changed = true;
-				return {
-					...block,
-					data: (jpeg ? resized.toJPEG(90) : resized.toPNG()).toString("base64"),
-					mimeType: jpeg ? "image/jpeg" : "image/png",
-				};
-			} catch {
-				return block;
-			}
+			const fitted = fitImageForRequest(block, targetPerImage, maxPx);
+			if (fitted !== block) changed = true;
+			return fitted;
 		});
 		return changed ? ({ ...message, content: guarded } as AgentMessage) : message;
 	});
