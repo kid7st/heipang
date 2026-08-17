@@ -628,7 +628,7 @@ export class Driver {
 					display_name: c.name ?? c.id,
 					provider: "openai-codex",
 					reasoning: c.reasoning ?? true,
-					contextWindow: c.contextWindow ?? (c.id === "gpt-5.6-sol" ? 400000 : 272000),
+					contextWindow: c.contextWindow ?? (c.id === "gpt-5.6-sol" ? 1000000 : 272000),
 					maxTokens: c.maxTokens ?? 128000,
 					alreadyAdded: false,
 				});
