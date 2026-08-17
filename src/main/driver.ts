@@ -222,6 +222,10 @@ export class Driver {
 	private session?: AgentSession;
 	private activeCwd = "";
 	private unsubscribe?: () => void;
+	// SessionManager.listAll() parses every JSONL (including image base64). Cache
+	// the result so startup/event bursts never rescan hundreds of MB repeatedly.
+	private sessionListCache?: SessionListItem[];
+	private sessionListInflight?: Promise<SessionListItem[]>;
 
 	// task state for the active session
 	private savedTasks: Task[] = [];
@@ -624,7 +628,7 @@ export class Driver {
 					display_name: c.name ?? c.id,
 					provider: "openai-codex",
 					reasoning: c.reasoning ?? true,
-					contextWindow: c.contextWindow ?? 272000,
+					contextWindow: c.contextWindow ?? (c.id === "gpt-5.6-sol" ? 400000 : 272000),
 					maxTokens: c.maxTokens ?? 128000,
 					alreadyAdded: false,
 				});
@@ -651,6 +655,7 @@ export class Driver {
 
 	async archiveSession(path: string): Promise<void> {
 		if (!existsSync(path)) return;
+		this.invalidateSessionList();
 		const sessionsRoot = join(this.agentDir, "sessions");
 		const rel = path.startsWith(sessionsRoot) ? path.slice(sessionsRoot.length + 1) : basename(path);
 		const dest = join(this.archiveDir(), rel);
@@ -672,6 +677,7 @@ export class Driver {
 	}
 
 	async deleteSession(path: string): Promise<void> {
+		this.invalidateSessionList();
 		if (existsSync(path)) rmSync(path, { force: true });
 		if (this.session?.sessionFile === path) this.disposeSession();
 		this.killBackground(path);
@@ -679,6 +685,7 @@ export class Driver {
 
 	/** Delete every session belonging to a workspace (cwd), then prune the empty dir. */
 	async deleteFolder(cwd: string): Promise<void> {
+		this.invalidateSessionList();
 		const infos = await SessionManager.listAll();
 		const dirs = new Set<string>();
 		for (const s of infos) {
@@ -705,6 +712,7 @@ export class Driver {
 
 	async renameSession(path: string, name: string): Promise<void> {
 		const trimmed = name.trim();
+		this.invalidateSessionList();
 		if (!trimmed) return;
 		if (this.session?.sessionFile === path) {
 			this.session.setSessionName(trimmed);
@@ -724,19 +732,32 @@ export class Driver {
 		}
 	}
 
+	private invalidateSessionList(): void {
+		this.sessionListCache = undefined;
+	}
+
 	async listSessions(): Promise<SessionListItem[]> {
-		const infos = await SessionManager.listAll();
-		return infos.map((s) => ({
-			path: s.path,
-			id: s.id,
-			cwd: s.cwd,
-			name: s.name,
-			created: s.created.getTime(),
-			modified: s.modified.getTime(),
-			messageCount: s.messageCount,
-			firstMessage: s.firstMessage,
-			allMessagesText: s.allMessagesText,
-		}));
+		if (this.sessionListCache) return this.sessionListCache;
+		if (this.sessionListInflight) return this.sessionListInflight;
+		this.sessionListInflight = (async () => {
+			const infos = await SessionManager.listAll();
+			const result = infos.map((s) => ({
+				path: s.path,
+				id: s.id,
+				cwd: s.cwd,
+				name: s.name,
+				created: s.created.getTime(),
+				modified: s.modified.getTime(),
+				messageCount: s.messageCount,
+				firstMessage: s.firstMessage,
+				allMessagesText: s.allMessagesText,
+			}));
+			this.sessionListCache = result;
+			return result;
+		})().finally(() => {
+			this.sessionListInflight = undefined;
+		});
+		return this.sessionListInflight;
 	}
 
 	// ------------------------------------------------------------ conversion
@@ -911,6 +932,7 @@ export class Driver {
 					this.emitState();
 					break;
 				case "message_end":
+					this.invalidateSessionList();
 					if ((event as any).message?.role === "assistant" && (event as any).message?.stopReason !== "error" && this.session) {
 						this.clearGuiRetry(this.session.sessionId);
 					}
@@ -1023,7 +1045,10 @@ export class Driver {
 			this.unsubscribe?.();
 			this.unsubscribe = undefined;
 			const unsub = session.subscribe((event) => {
-				if (event.type === "message_end") this.onSessionUpdated?.(file);
+				if (event.type === "message_end") {
+					this.invalidateSessionList();
+					this.onSessionUpdated?.(file);
+				}
 				if (event.type === "agent_end") {
 					this.markRunEnd(session);
 					this.finishBackground(file);
@@ -1510,6 +1535,7 @@ export class Driver {
 			resourceLoader: this.resourceLoader,
 		});
 		this.installManyImageGuard(session);
+		this.invalidateSessionList();
 		this.session = session;
 		this.activeCwd = workdir;
 		this.wireSession();

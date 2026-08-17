@@ -93,7 +93,7 @@ export function ModelManager({
 				id: mId.trim(),
 				name: mName.trim() || mId.trim(),
 				reasoning: true,
-				contextWindow: codex ? 272000 : 1000000,
+				contextWindow: codex ? (/gpt-5\.6/i.test(mId.trim()) ? 400000 : 272000) : 1000000,
 				maxTokens: 128000,
 			},
 		]);

@@ -131,10 +131,12 @@ export default function App() {
 			setTasks(t);
 			setCommands(cmds);
 		})();
-		queueRefreshSessions();
+		// Startup needs one session scan. The old retry schedule scanned every
+		// JSONL four times (0/0.7/2/5s), which was especially slow with image-heavy sessions.
+		refreshSessions();
 		refreshUsage();
 		refreshMeta();
-	}, [queueRefreshSessions, refreshUsage, refreshMeta]);
+	}, [refreshSessions, refreshUsage, refreshMeta]);
 
 	useEffect(() => {
 		return window.pi.onEvent((e) => {
