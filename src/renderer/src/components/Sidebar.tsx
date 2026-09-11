@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { VList } from "virtua";
 import type { SessionListItem } from "../../../shared/types";
-import { ChevronDownIcon, ChevronRightIcon, DotsIcon, MicIcon } from "./icons";
+import { ChevronDownIcon, ChevronRightIcon, DotsIcon } from "./icons";
 
 function Svg({ children }: { children: React.ReactNode }) {
 	return (
@@ -129,10 +129,6 @@ export function Sidebar({
 	onReorderFolders,
 	onSettings,
 	onCollapseSidebar,
-	metaActive,
-	metaPending,
-	inboxByCwd,
-	onOpenMeta,
 }: {
 	sessions: SessionListItem[];
 	activeFile?: string;
@@ -154,10 +150,6 @@ export function Sidebar({
 	onReorderFolders: (order: string[]) => void;
 	onSettings: () => void;
 	onCollapseSidebar: () => void;
-	metaActive: boolean;
-	metaPending: number;
-	inboxByCwd: Record<string, number>;
-	onOpenMeta: () => void;
 }) {
 	const [q, setQ] = useState("");
 	const [expanded, setExpanded] = useState<Set<string>>(loadExpanded);
@@ -281,14 +273,6 @@ export function Sidebar({
 				value={q}
 				onChange={(e) => setQ(e.target.value)}
 			/>
-			<div style={{ padding: "0 8px" }}>
-				<button className={`mv-row${metaActive ? " on" : ""}`} onClick={onOpenMeta} type="button">
-					<MicIcon size={16} />
-					<span className="nm">Meta Vincent</span>
-					{metaPending > 0 && <span className="bdg">{metaPending}</span>}
-				</button>
-				<div className="mv-sep" />
-			</div>
 			<VList className="session-list" data={rows}>
 				{(row) => {
 					if (row.kind === "folder") {
@@ -321,11 +305,6 @@ export function Sidebar({
 								<button className="folder-head" onClick={() => toggle(f.cwd)} title={f.cwd || "(no folder)"} type="button">
 									<span className="chev">{open ? <ChevronDownIcon size={13} /> : <ChevronRightIcon size={13} />}</span>
 									<span className="folder-name">{f.name}</span>
-									{inboxByCwd[f.cwd] > 0 && (
-										<span className="fcount" title={`${inboxByCwd[f.cwd]} items sorted here (Meta Vincent)`}>
-											{inboxByCwd[f.cwd]}
-										</span>
-									)}
 									{active && <span className="spinner" title="task running" />}
 								</button>
 								<button

@@ -1,7 +1,7 @@
 import { useState } from "react";
 import type { ActiveState, ModelsPayload, ThinkingLevel, UsageInfo } from "../../../shared/types";
 
-const THINKING: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh"];
+const THINKING: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 function resetLabel(iso: string | null | undefined): string {
 	if (!iso) return "";
@@ -16,8 +16,18 @@ function resetLabel(iso: string | null | undefined): string {
 
 function UsagePill({ usage, onRefresh }: { usage: UsageInfo | null; onRefresh: () => void }) {
 	const [open, setOpen] = useState(false);
-	const pct = usage?.fiveHour?.pct;
-	const label = !usage ? "usage" : usage.error ? "usage —" : `5h ${pct != null ? `${pct.toFixed(0)}%` : "—"}`;
+	const headline = usage?.fiveHour
+		? { label: "5h", pct: usage.fiveHour.pct }
+		: usage?.sevenDay
+			? { label: "7d", pct: usage.sevenDay.pct }
+			: undefined;
+	const label = !usage
+		? "usage"
+		: usage.error
+			? "usage —"
+			: headline
+				? `${headline.label} ${headline.pct.toFixed(0)}%`
+				: "usage —";
 	return (
 		<div className="usage-pill-wrap">
 			<button

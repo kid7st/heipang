@@ -3,6 +3,11 @@ import { join } from "node:path";
 import { app, BrowserWindow, nativeImage, shell } from "electron";
 import { Driver } from "./driver.js";
 import { registerIpc } from "./ipc.js";
+import { installStreamDecompressionFix } from "./provider-compat.js";
+
+// Must run before any provider request: proxies that gzip streamed responses
+// without a content-encoding header otherwise break every streaming model.
+installStreamDecompressionFix();
 
 function iconPath(): string | undefined {
 	for (const p of [join(__dirname, "../../build/icon.png"), join(process.resourcesPath, "icon.png")]) {

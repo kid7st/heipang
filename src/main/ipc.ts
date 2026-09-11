@@ -2,9 +2,8 @@ import { app, dialog, ipcMain, Notification, shell, type BrowserWindow } from "e
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Driver } from "./driver.js";
-import type { MetaConfirmPayload, MetaStatus, StreamEvent, Task } from "../shared/types.js";
+import type { StreamEvent, Task } from "../shared/types.js";
 import { checkForUpdate, downloadAndInstall } from "./updater.js";
-import { metaExportHtml, metaExportPng, metaShareLink } from "./metaShare.js";
 
 /**
  * Registers IPC handlers and forwards driver events to the renderer.
@@ -95,7 +94,7 @@ export function registerIpc(driver: Driver, getWindow: () => BrowserWindow | nul
 	h("pi:getAccounts", () => driver.getAccounts());
 	h("pi:loginAccount", (id: string) => driver.loginAccount(id));
 	h("pi:logoutAccount", (id: string) => driver.logoutAccount(id));
-	h("pi:getUsage", () => driver.getUsage());
+	h("pi:getUsage", (force?: boolean) => driver.getUsage(force));
 	h("pi:readFile", (path: string) => driver.readFile(path));
 	h("pi:readMemory", (cwd?: string) => driver.readMemory(cwd));
 	h("pi:writeMemory", (content: string, cwd?: string) => driver.writeMemory(content, cwd));
@@ -126,24 +125,6 @@ export function registerIpc(driver: Driver, getWindow: () => BrowserWindow | nul
 	h("pi:installUpdate", (url: string) =>
 		downloadAndInstall(url, (phase, pct, message) => send({ type: "updateProgress", phase, pct, message })),
 	);
-
-	// meta vincent
-	h("pi:metaListRecordings", () => driver.metaListRecordings());
-	h("pi:metaGetSummary", () => driver.metaGetSummary());
-	h("pi:metaSetStatus", (recId: string, status: MetaStatus) => driver.metaSetStatus(recId, status));
-	h("pi:metaUndo", (recId: string) => driver.metaUndo(recId));
-	h("pi:metaClassify", (recId: string) => driver.metaClassify(recId));
-	h("pi:metaConfirmSort", (recId: string, payload: MetaConfirmPayload) => driver.metaConfirmSort(recId, payload));
-	h("pi:metaListProjects", () => driver.metaListProjects());
-	h("pi:metaGetInbox", (cwd: string) => driver.metaGetInbox(cwd));
-	h("pi:metaInboxAction", (cwd: string, action: any, index: number) => driver.metaInboxAction(cwd, action, index));
-	h("pi:metaListIdeas", () => driver.metaListIdeas());
-	h("pi:metaIdeaAction", (action: any, index: number, cwd?: string) => driver.metaIdeaAction(action, index, cwd));
-	h("pi:metaGetConfig", () => driver.metaGetConfig());
-	h("pi:metaSetWorkspace", (path: string) => driver.metaSetWorkspace(path));
-	h("pi:metaExportHtml", (html: string, name: string) => metaExportHtml(getWindow(), html, name));
-	h("pi:metaExportPng", (html: string, name: string) => metaExportPng(getWindow(), html, name));
-	h("pi:metaShareLink", (html: string) => metaShareLink(html));
 
 	// misc
 	h("pi:getHome", () => homedir());

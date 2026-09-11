@@ -97,7 +97,7 @@ function UpdateCard() {
 }
 
 type Tab = "general" | "models" | "accounts" | "extensions" | "skills";
-const THINKING: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh"];
+const THINKING: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 function fileLabel(path?: string): string {
 	if (!path) return "Skill warning";

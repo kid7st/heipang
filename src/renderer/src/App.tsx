@@ -3,7 +3,6 @@ import type {
 	ActiveState,
 	CommandInfo,
 	GuiSettings,
-	MetaSummary,
 	ModelsPayload,
 	SessionListItem,
 	Task,
@@ -16,7 +15,6 @@ import { Composer } from "./components/Composer";
 import { HeaderBar } from "./components/HeaderBar";
 import { MemoryEditor } from "./components/MemoryEditor";
 import { MessageList } from "./components/MessageList";
-import { MetaVincent } from "./components/MetaVincent";
 import { PromptModal, type PromptSpec } from "./components/PromptModal";
 import { RequestDialog, type PendingRequest } from "./components/RequestDialog";
 import { SettingsModal } from "./components/SettingsModal";
@@ -69,9 +67,6 @@ export default function App() {
 	const [memory, setMemory] = useState<{ cwd?: string; label: string } | null>(null);
 	const [promptSpec, setPromptSpec] = useState<PromptSpec | null>(null);
 	const [toast, setToast] = useState<string | null>(null);
-	const [metaOpen, setMetaOpen] = useState(false);
-	const [metaRefresh, setMetaRefresh] = useState(0);
-	const [metaSummary, setMetaSummary] = useState<MetaSummary>({ pending: 0, ideas: 0, inboxByCwd: {} });
 
 	const activeFileRef = useRef<string | undefined>(undefined);
 	activeFileRef.current = state?.sessionFile;
@@ -105,11 +100,8 @@ export default function App() {
 		for (const timer of sessionRefreshTimers.current) clearTimeout(timer);
 		sessionRefreshTimers.current = [];
 	}, []);
-	const refreshUsage = useCallback(() => {
-		window.pi.getUsage().then(setUsage).catch(() => {});
-	}, []);
-	const refreshMeta = useCallback(() => {
-		window.pi.metaGetSummary().then(setMetaSummary).catch(() => {});
+	const refreshUsage = useCallback((force = false) => {
+		window.pi.getUsage(force).then(setUsage).catch(() => {});
 	}, []);
 
 	useEffect(() => {
@@ -135,8 +127,7 @@ export default function App() {
 		// JSONL four times (0/0.7/2/5s), which was especially slow with image-heavy sessions.
 		refreshSessions();
 		refreshUsage();
-		refreshMeta();
-	}, [refreshSessions, refreshUsage, refreshMeta]);
+	}, [refreshSessions, refreshUsage]);
 
 	useEffect(() => {
 		return window.pi.onEvent((e) => {
@@ -207,9 +198,12 @@ export default function App() {
 	}, []);
 
 	const streaming = !!state?.isStreaming;
+	const runActive = streaming || !!state?.isRetrying;
+	const wasRunActive = useRef(false);
 	useEffect(() => {
-		if (!streaming) refreshUsage();
-	}, [streaming, refreshUsage]);
+		if (wasRunActive.current && !runActive) refreshUsage(true);
+		wasRunActive.current = runActive;
+	}, [runActive, refreshUsage]);
 
 	const showUsage = useCallback(async () => {
 		const u = await window.pi.getUsage();
@@ -250,7 +244,6 @@ export default function App() {
 
 	const loadInto = useCallback(
 		async (loader: () => Promise<{ state: ActiveState; messages: UIMessage[]; modelFallbackMessage?: string }>) => {
-			setMetaOpen(false);
 			setConvLoading(true);
 			setMessages([]);
 			try {
@@ -278,7 +271,6 @@ export default function App() {
 
 	const onOpen = useCallback(
 		(s: SessionListItem) => {
-			setMetaOpen(false);
 			setUnread((prev) => {
 				if (!prev.has(s.path)) return prev;
 				const n = new Set(prev);
@@ -467,7 +459,7 @@ export default function App() {
 	const title = state?.sessionName || activeSession?.name || activeSession?.firstMessage || "";
 	const folderLabel = state ? gui.workspaceNames[state.cwd] || baseName(state.cwd) : "";
 
-	const showRight = gui.rightPanelOpen && !metaOpen;
+	const showRight = gui.rightPanelOpen;
 	const rightCol = showRight ? ` ${rightWidth}px` : "";
 	const cols = gui.sidebarCollapsed ? `1fr${rightCol}` : `${sbWidth}px 1fr${rightCol}`;
 
@@ -478,33 +470,6 @@ export default function App() {
 		},
 		[loadInto, queueRefreshSessions],
 	);
-
-	const onOpenMeta = useCallback(() => {
-		setMetaRefresh((n) => n + 1);
-		refreshMeta();
-		setMetaOpen(true);
-	}, [refreshMeta]);
-
-	// Promote a sorted to-do into a fresh session in its project, seeded with the to-do text.
-	const onStartTodo = useCallback(
-		async (cwd: string, seed: string) => {
-			await loadInto(() => window.pi.newSession(cwd));
-			queueRefreshSessions();
-			await window.pi.sendMessage(seed, []);
-			setState(await window.pi.getActiveState());
-			refreshMeta();
-		},
-		[loadInto, queueRefreshSessions, refreshMeta],
-	);
-
-	const onMetaConfig = useCallback(async () => {
-		const dir = await window.pi.pickDirectory();
-		if (!dir) return;
-		await window.pi.metaSetWorkspace(dir);
-		setMetaRefresh((n) => n + 1);
-		refreshMeta();
-		flash(`Recordings folder set to ${dir}`);
-	}, [refreshMeta, flash]);
 
 	return (
 		<div className="app" style={{ gridTemplateColumns: cols }}>
@@ -530,53 +495,37 @@ export default function App() {
 					onReorderFolders={async (order) => setGui(await window.pi.setGuiSettings({ folderOrder: order }))}
 					onSettings={() => setSettingsTab("general")}
 					onCollapseSidebar={() => setCollapsed(true)}
-					metaActive={metaOpen}
-					metaPending={metaSummary.pending}
-					inboxByCwd={metaSummary.inboxByCwd}
-					onOpenMeta={onOpenMeta}
 				/>
 			)}
 			{!gui.sidebarCollapsed && (
 				<div className="resizer" style={{ left: sbWidth - 4 }} onMouseDown={startResize} />
 			)}
 			<div className="main">
-				{metaOpen ? (
-					<MetaVincent
-						flash={flash}
-						onStartTodo={onStartTodo}
-						onOpenConfig={onMetaConfig}
-						onChanged={refreshMeta}
-						refreshKey={metaRefresh}
-					/>
-				) : (
-					<>
-						<HeaderBar
-							state={state}
-							title={title}
-							folderLabel={folderLabel}
-							sidebarCollapsed={gui.sidebarCollapsed}
-							rightPanelOpen={gui.rightPanelOpen}
-							onExpandSidebar={() => setCollapsed(false)}
-							onToggleRightPanel={toggleRightPanel}
-							onRenameActive={onRenameActive}
-						/>
-						<div className="conv" style={{ ["--heipang-bg" as string]: `url(${heipangBg})` }}>
-							{convLoading ? (
-								<div className="conv-loading">Loading conversation…</div>
-							) : (
-								<MessageList messages={messages} streaming={!!state?.isStreaming} />
-							)}
-						</div>
-						<Composer
-							commands={commands}
-							onSend={onSend}
-							onStop={() => window.pi.abort()}
-							streaming={!!state?.isStreaming}
-							disabled={convLoading}
-							sessionKey={state?.sessionFile ?? state?.sessionId ?? "new"}
-						/>
-					</>
-				)}
+				<HeaderBar
+					state={state}
+					title={title}
+					folderLabel={folderLabel}
+					sidebarCollapsed={gui.sidebarCollapsed}
+					rightPanelOpen={gui.rightPanelOpen}
+					onExpandSidebar={() => setCollapsed(false)}
+					onToggleRightPanel={toggleRightPanel}
+					onRenameActive={onRenameActive}
+				/>
+				<div className="conv" style={{ ["--heipang-bg" as string]: `url(${heipangBg})` }}>
+					{convLoading ? (
+						<div className="conv-loading">Loading conversation…</div>
+					) : (
+						<MessageList messages={messages} streaming={!!state?.isStreaming} />
+					)}
+				</div>
+				<Composer
+					commands={commands}
+					onSend={onSend}
+					onStop={() => window.pi.abort()}
+					streaming={runActive}
+					disabled={convLoading}
+					sessionKey={state?.sessionFile ?? state?.sessionId ?? "new"}
+				/>
 			</div>
 
 			{showRight && (
@@ -592,7 +541,7 @@ export default function App() {
 					onClose={toggleRightPanel}
 					onSetModel={onSetModel}
 					onSetThinking={onSetThinking}
-					onRefreshUsage={refreshUsage}
+					onRefreshUsage={() => refreshUsage(true)}
 				/>
 			)}
 			{showRight && (

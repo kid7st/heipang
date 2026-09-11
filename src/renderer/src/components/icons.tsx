@@ -112,15 +112,6 @@ export function WarnIcon({ size }: P) {
 	);
 }
 
-export function MicIcon({ size }: P) {
-	return (
-		<svg {...base(size)}>
-			<rect x="9" y="3" width="6" height="11" rx="3" />
-			<path d="M5 11a7 7 0 0 0 14 0M12 18v3" />
-		</svg>
-	);
-}
-
 export function TrashIcon({ size }: P) {
 	return (
 		<svg {...base(size)}>

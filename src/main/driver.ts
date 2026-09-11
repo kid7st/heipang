@@ -2,33 +2,24 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, w
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { nativeImage } from "electron";
-import type { AgentMessage } from "@mariozechner/pi-agent-core";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import {
 	AgentSession,
-	AuthStorage,
 	calculateContextTokens,
 	createAgentSession,
 	DefaultResourceLoader,
 	getAgentDir,
-	ModelRegistry,
+	ModelRuntime,
 	SessionManager,
 	SettingsManager,
-} from "@mariozechner/pi-coding-agent";
-import { completeSimple, getModels, type Model } from "@mariozechner/pi-ai";
+} from "@earendil-works/pi-coding-agent";
+import type { AuthPrompt, Model } from "@earendil-works/pi-ai";
+import { convertPdfAttachments } from "./provider-compat.js";
 import type {
 	AccountInfo,
 	ActiveState,
 	CommandInfo,
 	GuiSettings,
-	MetaClassification,
-	MetaConfirmPayload,
-	MetaInboxItem,
-	MetaProject,
-	MetaProjectInbox,
-	MetaRec,
-	MetaSrc,
-	MetaStatus,
-	MetaSummary,
 	ModelInfo,
 	ModelsPayload,
 	NewModelInput,
@@ -64,12 +55,6 @@ const DEFAULT_GUI_SETTINGS: GuiSettings = {
 	rightPanelWidth: 320,
 	sidebarCollapsed: false,
 };
-
-interface TriageEntry {
-	status: MetaStatus;
-	projectName?: string;
-	summary?: string;
-}
 
 const MAX_TASK_LEN = 20;
 function capTitle(s: string): string {
@@ -174,6 +159,8 @@ interface CatalogModel {
 	contextWindow?: number;
 	maxTokens?: number;
 }
+// Codex only returns its newest models when the caller looks like a current CLI.
+const CODEX_CLIENT_VERSION = "0.153.4";
 const ANTHROPIC_FLOOR: [number, number] = [4, 7];
 const OPENAI_FLOOR: [number, number] = [5, 5];
 function anthropicVer(id: string): [number, number] {
@@ -196,6 +183,12 @@ function verCmpDesc(a: [number, number], b: [number, number]): number {
 function isRecentAnthropic(id: string): boolean {
 	return verGte(anthropicVer(id), ANTHROPIC_FLOOR);
 }
+function usesAdaptiveAnthropicThinking(id: string): boolean {
+	const [major, minor] = anthropicVer(id);
+	if (/fable/.test(id)) return major >= 5;
+	if (/opus|sonnet/.test(id)) return major >= 5 || (major === 4 && minor >= 6);
+	return false;
+}
 function isRecentOpenAI(id: string): boolean {
 	return verGte(openaiVer(id), OPENAI_FLOOR);
 }
@@ -212,8 +205,10 @@ function anthropicDefaultCtx(id: string): number {
  */
 export class Driver {
 	readonly agentDir: string;
-	private authStorage: AuthStorage;
-	private modelRegistry: ModelRegistry;
+	// pi 0.85 replaced AuthStorage + ModelRegistry with the async ModelRuntime,
+	// so the runtime is created lazily and awaited by every consumer.
+	private modelRuntimePromise: Promise<ModelRuntime>;
+	private modelRuntimeResolved?: ModelRuntime;
 	private settings: SettingsManager;
 
 	private resourceLoader: DefaultResourceLoader;
@@ -267,6 +262,9 @@ export class Driver {
 	// retry. Keep a GUI-level fallback that continues from the same user turn.
 	private guiRetryAttempt = new Map<string, number>();
 	private guiRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+	// A manual stop must also suppress retries which are created just after the
+	// provider/agent emits its final error event. Cleared by the next user send.
+	private cancelledRuns = new Set<string>();
 	private static readonly GUI_RETRY_MAX = 3;
 	private static readonly GUI_RETRY_BASE_DELAY_MS = 2500;
 
@@ -279,10 +277,7 @@ export class Driver {
 
 	constructor() {
 		this.agentDir = getAgentDir();
-		const authPath = join(this.agentDir, "auth.json");
-		const modelsPath = join(this.agentDir, "models.json");
-		this.authStorage = AuthStorage.create(authPath);
-		this.modelRegistry = ModelRegistry.create(this.authStorage, modelsPath);
+		this.modelRuntimePromise = this.createModelRuntime();
 		this.settings = SettingsManager.create(homedir(), this.agentDir);
 		this.resourceLoader = new DefaultResourceLoader({
 			cwd: homedir(),
@@ -382,7 +377,27 @@ export class Driver {
 
 	// ---------------------------------------------------------------- models
 
-	private modelToInfo(m: AnyModel): ModelInfo {
+	private createModelRuntime(): Promise<ModelRuntime> {
+		return ModelRuntime.create({
+			authPath: join(this.agentDir, "auth.json"),
+			modelsPath: join(this.agentDir, "models.json"),
+			allowModelNetwork: false, // keep startup offline-fast; catalogs are refreshed separately
+		});
+	}
+
+	/** The shared model/auth runtime. Created once, rebuilt after models.json writes. */
+	private async runtime(): Promise<ModelRuntime> {
+		if (!this.modelRuntimeResolved) this.modelRuntimeResolved = await this.modelRuntimePromise;
+		return this.modelRuntimeResolved;
+	}
+
+	/** ModelRuntime snapshots models.json at creation, so reload it after writes. */
+	private reloadModelRuntime(): void {
+		this.modelRuntimeResolved = undefined;
+		this.modelRuntimePromise = this.createModelRuntime();
+	}
+
+	private modelToInfo(m: AnyModel, hasAuth: boolean): ModelInfo {
 		return {
 			provider: m.provider,
 			id: m.id,
@@ -390,15 +405,19 @@ export class Driver {
 			reasoning: m.reasoning,
 			contextWindow: m.contextWindow,
 			maxTokens: m.maxTokens,
-			hasAuth: this.modelRegistry.hasConfiguredAuth(m),
+			hasAuth,
 		};
 	}
 
 	async listModels(): Promise<ModelsPayload> {
 		await this.settings.reload();
-		this.modelRegistry.refresh();
-		const all = this.modelRegistry.getAll().map((m) => this.modelToInfo(m));
-		const available = this.modelRegistry.getAvailable().map((m) => this.modelToInfo(m));
+		const runtime = await this.runtime();
+		const availableModels = await runtime.getAvailable();
+		const availableKeys = new Set(availableModels.map((m) => `${m.provider}/${m.id}`));
+		const all = runtime
+			.getModels()
+			.map((m) => this.modelToInfo(m as AnyModel, availableKeys.has(`${m.provider}/${m.id}`)));
+		const available = availableModels.map((m) => this.modelToInfo(m as AnyModel, true));
 		return {
 			all,
 			available,
@@ -424,7 +443,7 @@ export class Driver {
 	private writeModelsJson(data: any): void {
 		const p = join(this.agentDir, "models.json");
 		writeFileSync(p, `${JSON.stringify(data, null, 2)}\n`, "utf8");
-		this.modelRegistry.refresh();
+		this.reloadModelRuntime();
 	}
 
 	async addModels(models: NewModelInput[]): Promise<ModelsPayload> {
@@ -446,6 +465,11 @@ export class Driver {
 			// Provider-specific wiring so new models work AND xhigh stays selectable.
 			if (m.provider === "anthropic" && m.reasoning) {
 				entry.thinkingLevelMap = { xhigh: "xhigh" };
+				if (usesAdaptiveAnthropicThinking(m.id)) {
+					// Used by newer pi-ai releases; the bundled release is patched at
+					// build time with the equivalent model-ID recognition.
+					entry.compat = { forceAdaptiveThinking: true, supportsTemperature: false };
+				}
 			} else if (m.provider === "openai-codex") {
 				entry.api = "openai-codex-responses";
 				entry.baseUrl = "https://chatgpt.com/backend-api";
@@ -556,7 +580,7 @@ export class Driver {
 	 * (>= 4.7) and enriched with context windows from the remote catalog. */
 	async fetchRemoteModels(): Promise<{ ok: boolean; models?: RemoteModel[]; error?: string }> {
 		try {
-			const token = await this.authStorage.getApiKey("anthropic");
+			const token = await this.providerApiKey("anthropic");
 			if (!token) return { ok: false, error: "No anthropic auth found in auth.json" };
 			const res = await fetch("https://api.anthropic.com/v1/models?limit=1000", {
 				headers: {
@@ -569,7 +593,16 @@ export class Driver {
 				const body = await res.text().catch(() => "");
 				return { ok: false, error: `HTTP ${res.status}: ${body.slice(0, 300)}` };
 			}
-			const json = (await res.json()) as { data?: Array<{ id: string; display_name?: string; created_at?: string }> };
+			const json = (await res.json()) as {
+				data?: Array<{
+					id: string;
+					display_name?: string;
+					created_at?: string;
+					max_input_tokens?: number;
+					max_tokens?: number;
+					capabilities?: { thinking?: { supported?: boolean } };
+				}>;
+			};
 			const catalog = await this.loadCatalog();
 			const cat = new Map(catalog.filter((c) => c.provider === "anthropic").map((c) => [c.id, c] as const));
 			// "Already added" = already ENABLED (in the chat dropdown), not merely
@@ -585,9 +618,9 @@ export class Driver {
 						display_name: d.display_name ?? d.id,
 						created_at: d.created_at,
 						provider: "anthropic",
-						reasoning: c?.reasoning ?? true,
-						contextWindow: c?.contextWindow ?? anthropicDefaultCtx(d.id),
-						maxTokens: c?.maxTokens ?? 128000,
+						reasoning: d.capabilities?.thinking?.supported ?? c?.reasoning ?? true,
+						contextWindow: d.max_input_tokens ?? c?.contextWindow ?? anthropicDefaultCtx(d.id),
+						maxTokens: d.max_tokens ?? c?.maxTokens ?? 128000,
 						alreadyAdded: enabled.has(`anthropic/${d.id}`),
 					};
 				})
@@ -602,13 +635,53 @@ export class Driver {
 		}
 	}
 
-	/** OpenAI (ChatGPT/Codex): the backend has no public model-list endpoint, so
-	 * we merge pi-ai's bundled catalog with the remote catalog (which carries the
-	 * newest models + correct context windows), limited to recent models (>= 5.5). */
+	/** Live Codex model list. The ChatGPT backend exposes the same endpoint the
+	 * Codex CLI uses, and it is the only authoritative source for a model's real
+	 * context window. Guessed windows are dangerous: an inflated value disables
+	 * auto-compaction until the provider rejects the request outright. */
+	private async fetchCodexModelsLive(): Promise<Map<string, CatalogModel & { hidden?: boolean }>> {
+		const out = new Map<string, CatalogModel & { hidden?: boolean }>();
+		try {
+			const apiKey = await this.providerApiKey("openai-codex");
+			if (!apiKey) return out;
+			const accountId = this.decodeJwt(apiKey)?.["https://api.openai.com/auth"]?.chatgpt_account_id;
+			if (!accountId) return out;
+			const res = await fetch(`https://chatgpt.com/backend-api/codex/models?client_version=${CODEX_CLIENT_VERSION}`, {
+				headers: {
+					Accept: "application/json",
+					Authorization: `Bearer ${apiKey}`,
+					"chatgpt-account-id": accountId,
+					originator: "pi",
+				},
+				signal: AbortSignal.timeout(10000),
+			});
+			if (!res.ok) return out;
+			const json: any = await res.json();
+			for (const m of json?.models ?? []) {
+				if (!m?.slug) continue;
+				out.set(m.slug, {
+					provider: "openai-codex",
+					id: m.slug,
+					name: m.title || m.slug,
+					reasoning: Array.isArray(m.supported_reasoning_levels) ? m.supported_reasoning_levels.length > 0 : true,
+					contextWindow: typeof m.context_window === "number" ? m.context_window : undefined,
+					maxTokens: typeof m.max_output_tokens === "number" ? m.max_output_tokens : undefined,
+					hidden: m.visibility === "hide",
+				});
+			}
+		} catch {
+			/* offline or signed out — fall back to the bundled/remote catalog */
+		}
+		return out;
+	}
+
+	/** OpenAI (ChatGPT/Codex): merges pi-ai's bundled catalog and the remote
+	 * catalog, then overlays the live Codex model list (authoritative names and
+	 * context windows), limited to recent models (>= 5.5). */
 	async fetchRemoteOpenAIModels(): Promise<{ ok: boolean; models?: RemoteModel[]; error?: string }> {
 		try {
 			const catalog = await this.loadCatalog();
-			const bundled = (getModels("openai-codex") as AnyModel[]) ?? [];
+			const bundled = ((await this.runtime()).getModels("openai-codex") as AnyModel[]) ?? [];
 			const map = new Map<string, RemoteModel>();
 			for (const m of bundled) {
 				map.set(m.id, {
@@ -628,8 +701,22 @@ export class Driver {
 					display_name: c.name ?? c.id,
 					provider: "openai-codex",
 					reasoning: c.reasoning ?? true,
-					contextWindow: c.contextWindow ?? (c.id === "gpt-5.6-sol" ? 1000000 : 272000),
+					contextWindow: c.contextWindow ?? 272000,
 					maxTokens: c.maxTokens ?? 128000,
+					alreadyAdded: false,
+				});
+			}
+			// Live values win: a wrong context window silently breaks compaction.
+			for (const [id, live] of await this.fetchCodexModelsLive()) {
+				if (live.hidden && !map.has(id)) continue;
+				const current = map.get(id);
+				map.set(id, {
+					id,
+					display_name: live.name ?? current?.display_name ?? id,
+					provider: "openai-codex",
+					reasoning: live.reasoning ?? current?.reasoning ?? true,
+					contextWindow: live.contextWindow ?? current?.contextWindow ?? 272000,
+					maxTokens: live.maxTokens ?? current?.maxTokens ?? 128000,
 					alreadyAdded: false,
 				});
 			}
@@ -874,7 +961,7 @@ export class Driver {
 
 	private scheduleGuiRetry(session: AgentSession): void {
 		const sessionId = session.sessionId;
-		if (this.guiRetryTimers.has(sessionId)) return;
+		if (this.cancelledRuns.has(sessionId) || this.guiRetryTimers.has(sessionId)) return;
 		const last = this.lastAssistant(session.messages as any[]);
 		if (!this.isRetryableAssistantError(last)) {
 			this.guiRetryAttempt.delete(sessionId);
@@ -889,6 +976,11 @@ export class Driver {
 		const delayMs = Driver.GUI_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1);
 		const timer = setTimeout(() => {
 			this.guiRetryTimers.delete(sessionId);
+			if (this.cancelledRuns.has(sessionId)) {
+				this.guiRetryAttempt.delete(sessionId);
+				this.emitState();
+				return;
+			}
 			// Give the SDK's built-in retry a chance first. If it has started, don't duplicate it.
 			if ((session as any).isRetrying || session.isStreaming) {
 				this.emitState();
@@ -926,6 +1018,15 @@ export class Driver {
 		this.unsubscribe = this.session.subscribe((event) => {
 			switch (event.type) {
 				case "message_start":
+					// Clear a previous manual-stop latch only once the new user turn
+					// reaches the ordered session event queue. This lets any stale
+					// auto-retry event from the aborted turn be cancelled first.
+					if ((event as any).message?.role === "user" && this.session) {
+						this.cancelledRuns.delete(this.session.sessionId);
+					}
+					this.scheduleEmit();
+					this.emitState();
+					break;
 				case "message_update":
 				case "turn_end":
 					this.scheduleEmit();
@@ -952,8 +1053,24 @@ export class Driver {
 					}
 					break;
 				}
-				case "auto_retry_start":
+				case "auto_retry_start": {
+					const session = this.session;
+					if (session && this.cancelledRuns.has(session.sessionId)) {
+						// AgentSession emits auto_retry_start immediately before creating its
+						// abort controller. Run in a microtask so abortRetry sees that controller.
+						queueMicrotask(() => {
+							if (!this.cancelledRuns.has(session.sessionId)) return;
+							session.abortRetry();
+							session.agent.abort();
+							this.emitState();
+						});
+						break;
+					}
 					this.onError?.(`Auto-retry: ${event.errorMessage}`);
+					this.emitState();
+					break;
+				}
+				case "auto_retry_end":
 					this.emitState();
 					break;
 				case "compaction_start":
@@ -1006,7 +1123,10 @@ export class Driver {
 	private disposeSession(): void {
 		this.unsubscribe?.();
 		this.unsubscribe = undefined;
-		if (this.session) this.clearGuiRetry(this.session.sessionId);
+		if (this.session) {
+			this.clearGuiRetry(this.session.sessionId);
+			this.cancelledRuns.delete(this.session.sessionId);
+		}
 		this.session?.dispose();
 		this.session = undefined;
 		this.clearSessionUiState();
@@ -1160,8 +1280,8 @@ export class Driver {
 		}, 1500);
 	}
 
-	private pickExtractionModel(): Model<any> | undefined {
-		const avail = this.modelRegistry.getAvailable();
+	private async pickExtractionModel(): Promise<Model<any> | undefined> {
+		const avail = (await (await this.runtime()).getAvailable()) as AnyModel[];
 		const haikus = avail.filter((m) => m.provider === "anthropic" && m.id.includes("haiku"));
 		// Prefer a CURRENT haiku (4.x). The old claude-3-5-haiku-* is end-of-life and
 		// silently returns empty content, which made task extraction produce nothing.
@@ -1185,7 +1305,7 @@ export class Driver {
 		// Token guard: auto-runs only when a NEW user turn appeared since last extraction.
 		const userCount = msgs.filter((m) => m.role === "user").length;
 		if (!force && userCount === this.lastExtractUserCount) return { ok: true, tasks: this.getTasks() };
-		const model = this.pickExtractionModel();
+		const model = await this.pickExtractionModel();
 		if (!model) return { ok: false, error: "No model available for extraction" };
 
 		const lines: string[] = [];
@@ -1217,12 +1337,10 @@ export class Driver {
 
 		this.extracting = true;
 		try {
-			const auth = await this.modelRegistry.getApiKeyAndHeaders(model);
-			if (!auth.ok) return { ok: false, error: auth.error };
-			const result = await completeSimple(
+			const result = await (await this.runtime()).completeSimple(
 				model,
 				{ systemPrompt: sys, messages: [{ role: "user", content: user, timestamp: Date.now() }] },
-				{ apiKey: auth.apiKey, headers: auth.headers, maxTokens: 1024 },
+				{ maxTokens: 1024 },
 			);
 			const text = (result.content ?? []).filter((c: any) => c.type === "text").map((c: any) => c.text).join("");
 			// Bail out if the user switched sessions while we were summarizing, so we
@@ -1348,10 +1466,11 @@ export class Driver {
 	// ------------------------------------------------------------- accounts
 
 	async getAccounts(): Promise<AccountInfo[]> {
-		const providers = this.authStorage.getOAuthProviders();
-		return providers
-			.filter((p) => p.id !== "github-copilot") // not used here
-			.map((p) => ({ id: p.id, name: p.name, connected: this.authStorage.hasAuth(p.id) }));
+		const runtime = await this.runtime();
+		return runtime
+			.getProviders()
+			.filter((p) => p.auth?.oauth && p.id !== "github-copilot") // not used here
+			.map((p) => ({ id: p.id, name: p.name ?? p.id, connected: runtime.hasConfiguredAuth(p.id) }));
 	}
 
 	async deleteExtension(path: string): Promise<void> {
@@ -1382,12 +1501,23 @@ export class Driver {
 		if (!this.oauthBridge) return { ok: false, error: "OAuth bridge unavailable" };
 		const bridge = this.oauthBridge;
 		try {
-			await this.authStorage.login(id, {
-				onAuth: (info) => bridge.openExternal(info.url),
-				onPrompt: async (prompt) => (await bridge.requestInput("prompt", prompt)) ?? "",
-				onManualCodeInput: async () => (await bridge.requestInput("code", { message: "Paste the authorization code" })) ?? "",
-				onSelect: async (prompt) => bridge.requestInput("select", prompt),
-				onProgress: () => {},
+			const runtime = await this.runtime();
+			await runtime.login(id, "oauth", {
+				notify: (event) => {
+					if (event.type === "auth_url") bridge.openExternal(event.url);
+					if (event.type === "device_code") bridge.openExternal(event.verificationUri);
+				},
+				prompt: async (prompt: AuthPrompt) => {
+					if (prompt.type === "select") {
+						const choice = await bridge.requestInput("select", {
+							message: prompt.message,
+							options: prompt.options.map((o) => ({ value: o.id, label: o.label })),
+						});
+						return choice ?? "";
+					}
+					const kind = prompt.type === "manual_code" ? "code" : "prompt";
+					return (await bridge.requestInput(kind, { message: prompt.message })) ?? "";
+				},
 			});
 			return { ok: true };
 		} catch (err) {
@@ -1395,8 +1525,18 @@ export class Driver {
 		}
 	}
 
-	logoutAccount(id: string): void {
-		this.authStorage.logout(id);
+	async logoutAccount(id: string): Promise<void> {
+		await (await this.runtime()).logout(id);
+	}
+
+	/** Resolved API key/token for a provider (OAuth tokens are refreshed for us). */
+	private async providerApiKey(provider: string): Promise<string | undefined> {
+		try {
+			const auth = await (await this.runtime()).getAuth(provider);
+			return auth?.auth.apiKey;
+		} catch {
+			return undefined;
+		}
 	}
 
 	// --------------------------------------------------------------- usage
@@ -1414,14 +1554,14 @@ export class Driver {
 	}
 
 	/** Live usage for the active model's provider (Claude Max / ChatGPT Codex). */
-	async getUsage(): Promise<UsageInfo> {
+	async getUsage(force = false): Promise<UsageInfo> {
 		const provider = this.session?.model?.provider ?? this.settings.getDefaultProvider();
 		if (!provider) return { error: "No active provider" };
 		if (provider !== "anthropic" && provider !== "openai-codex") return { provider, error: "Usage not available for this provider" };
 
 		// Serve fresh cache without touching the network (avoids 429 from frequent polling).
 		const cached = this.usageCache.get(provider);
-		if (cached && Date.now() - cached.ts < Driver.USAGE_TTL) return cached.value;
+		if (!force && cached && Date.now() - cached.ts < Driver.USAGE_TTL) return cached.value;
 
 		// Coalesce concurrent callers (mount + stream-end + /usage can fire together).
 		const inflight = this.usageInflight.get(provider);
@@ -1447,7 +1587,7 @@ export class Driver {
 			return value;
 		};
 		try {
-			const apiKey = await this.authStorage.getApiKey(provider);
+			const apiKey = await this.providerApiKey(provider);
 			if (!apiKey) return { provider, error: "Not signed in" };
 			if (provider === "anthropic") {
 				const res = await fetch("https://api.anthropic.com/api/oauth/usage", {
@@ -1472,12 +1612,36 @@ export class Driver {
 			});
 			if (!res.ok) return stale(httpError(res.status));
 			const d: any = await res.json();
-			const p = d.rate_limit?.primary_window;
-			const s = d.rate_limit?.secondary_window;
+			const primary = d.rate_limit?.primary_window;
+			const secondary = d.rate_limit?.secondary_window;
+			const windows = [primary, secondary].filter(Boolean);
+			const seconds = (w: any): number | undefined =>
+				typeof w?.limit_window_seconds === "number" ? w.limit_window_seconds : undefined;
+			const toUsageWindow = (w: any) => ({
+				pct: Number(w.used_percent) || 0,
+				resetsAt: w.reset_at
+					? new Date(Number(w.reset_at) * 1000).toISOString()
+					: typeof w.reset_after_seconds === "number"
+						? new Date(Date.now() + w.reset_after_seconds * 1000).toISOString()
+						: null,
+			});
+
+			// Codex does not guarantee that primary means 5-hour and secondary
+			// means 7-day. For some plans/models (including GPT-5.6 Sol), primary
+			// is itself the 7-day window and secondary is null. Classify using the
+			// duration returned by the API, with positional fallback for old payloads.
+			const fiveHourRaw = windows.find((w: any) => {
+				const duration = seconds(w);
+				return duration != null && Math.abs(duration - 5 * 3600) <= 3600;
+			}) ?? (seconds(primary) == null ? primary : undefined);
+			const sevenDayRaw = windows.find((w: any) => {
+				const duration = seconds(w);
+				return duration != null && Math.abs(duration - 7 * 86400) <= 86400;
+			}) ?? (seconds(secondary) == null ? secondary : undefined);
 			return ok({
 				provider,
-				fiveHour: p ? { pct: p.used_percent, resetsAt: p.reset_at ? new Date(p.reset_at * 1000).toISOString() : null } : undefined,
-				sevenDay: s ? { pct: s.used_percent, resetsAt: s.reset_at ? new Date(s.reset_at * 1000).toISOString() : null } : undefined,
+				fiveHour: fiveHourRaw ? toUsageWindow(fiveHourRaw) : undefined,
+				sevenDay: sevenDayRaw ? toUsageWindow(sevenDayRaw) : undefined,
 			});
 		} catch (err) {
 			return stale(err instanceof Error ? err.message : String(err));
@@ -1498,13 +1662,12 @@ export class Driver {
 		const { session, modelFallbackMessage } = await createAgentSession({
 			agentDir: this.agentDir,
 			cwd: sessionManager.getCwd(),
-			authStorage: this.authStorage,
-			modelRegistry: this.modelRegistry,
+			modelRuntime: await this.runtime(),
 			settingsManager: this.settings,
 			resourceLoader: this.resourceLoader,
 			sessionManager,
 		});
-		this.installManyImageGuard(session);
+		this.installSessionGuards(session);
 		this.session = session;
 		this.activeCwd = sessionManager.getCwd();
 		this.wireSession();
@@ -1515,11 +1678,31 @@ export class Driver {
 		return { state: this.getActiveState()!, messages, modelFallbackMessage };
 	}
 
-	private installManyImageGuard(session: AgentSession): void {
+	private installSessionGuards(session: AgentSession): void {
 		const previousTransform = session.agent.transformContext;
 		session.agent.transformContext = async (messages, signal) => {
 			const transformed = previousTransform ? await previousTransform(messages, signal) : messages;
 			return guardManyImageContext(transformed);
+		};
+
+		// Provider SDK retries are opaque to AgentSession. In particular, the
+		// Anthropic SDK sleeps for Retry-After without observing AbortSignal; a
+		// five-hour usage-limit response can therefore make Stop wait for hours.
+		// Let AgentSession perform retries instead: its backoff is abortable and is
+		// already surfaced in the GUI.
+		const previousStream = session.agent.streamFunction;
+		session.agent.streamFunction = (model: any, context: any, options: any) =>
+			previousStream(model, context, { ...options, maxRetries: 0 });
+		// Also cap provider-requested backoff so a long Retry-After cannot pin the UI.
+		session.agent.maxRetryDelayMs = 30_000;
+
+		// pi has no PDF content type: attachments ride along as images, which every
+		// provider rejects for application/pdf. Rewrite them on the way out.
+		const previousPayload = session.agent.onPayload;
+		session.agent.onPayload = async (payload: any, model: any) => {
+			const upstream = previousPayload ? await previousPayload(payload, model) : undefined;
+			const current = upstream ?? payload;
+			return convertPdfAttachments(current, model?.api) ?? upstream;
 		};
 	}
 
@@ -1529,12 +1712,11 @@ export class Driver {
 		const { session, modelFallbackMessage } = await createAgentSession({
 			agentDir: this.agentDir,
 			cwd: workdir,
-			authStorage: this.authStorage,
-			modelRegistry: this.modelRegistry,
+			modelRuntime: await this.runtime(),
 			settingsManager: this.settings,
 			resourceLoader: this.resourceLoader,
 		});
-		this.installManyImageGuard(session);
+		this.installSessionGuards(session);
 		this.invalidateSessionList();
 		this.session = session;
 		this.activeCwd = workdir;
@@ -1570,15 +1752,23 @@ export class Driver {
 	}
 
 	async abort(): Promise<void> {
-		if (this.session) this.clearGuiRetry(this.session.sessionId);
-		await this.session?.abort();
-		this.markRunEnd(this.session);
+		const session = this.session;
+		if (!session) return;
+		// Set the latch before aborting: agent_end/auto_retry_start may be emitted
+		// during abort and must not resurrect the run.
+		this.cancelledRuns.add(session.sessionId);
+		this.clearGuiRetry(session.sessionId);
+		session.abortRetry();
+		await session.abort();
+		// Covers a retry created by an agent_end handler racing with abort().
+		session.abortRetry();
+		this.markRunEnd(session);
 		this.emitState();
 	}
 
 	async setModel(provider: string, id: string): Promise<ActiveState> {
 		await this.ensureSession();
-		const model = this.modelRegistry.find(provider, id);
+		const model = (await this.runtime()).getModel(provider, id) as AnyModel | undefined;
 		if (!model) throw new Error(`Model not found: ${provider}/${id}`);
 		await this.session!.setModel(model);
 		this.emitState();
@@ -1592,369 +1782,4 @@ export class Driver {
 		return this.getActiveState()!;
 	}
 
-	// =====================================================================
-	// Meta Vincent: triage voicenote recordings into projects.
-	// All storage is ADDITIVE and never rewrites existing pi/HEIPANG data.
-	//   triage  -> ~/.pi/agent/meta-vincent/triage.json   (per recId status)
-	//   ideas   -> ~/.pi/agent/meta-vincent/ideas.json     (global Ideas pool)
-	//   inbox   -> <cwd>/.heipang-inbox.json               (per project to-do/idea/memory)
-	//   memory  -> appended (never rewritten) to <cwd>/AGENTS.md with a marker
-	// =====================================================================
-
-	private metaDir(): string {
-		return join(this.agentDir, "meta-vincent");
-	}
-	private triagePath(): string {
-		return join(this.metaDir(), "triage.json");
-	}
-	private ideasPath(): string {
-		return join(this.metaDir(), "ideas.json");
-	}
-	private inboxPath(cwd: string): string {
-		return join(cwd, ".heipang-inbox.json");
-	}
-	private workspaceRoot(): string {
-		return this.guiSettings.voicenoteWorkspace || join(homedir(), "Documents", "meetings");
-	}
-
-	private readJson<T>(p: string, fallback: T): T {
-		try {
-			return JSON.parse(readFileSync(p, "utf8")) as T;
-		} catch {
-			return fallback;
-		}
-	}
-	private writeJson(p: string, data: unknown): void {
-		try {
-			mkdirSync(dirname(p), { recursive: true });
-			writeFileSync(p, `${JSON.stringify(data, null, 2)}\n`, "utf8");
-		} catch {
-			/* ignore */
-		}
-	}
-
-	private readTriage(): Record<string, TriageEntry> {
-		return this.readJson<Record<string, TriageEntry>>(this.triagePath(), {});
-	}
-	private writeTriage(t: Record<string, TriageEntry>): void {
-		this.writeJson(this.triagePath(), t);
-	}
-
-	private readMeetings(): any[] {
-		const root = this.workspaceRoot();
-		const idx = join(root, "_index", "meetings.jsonl");
-		const out: any[] = [];
-		try {
-			if (existsSync(idx)) {
-				for (const ln of readFileSync(idx, "utf8").split("\n")) {
-					const s = ln.trim();
-					if (!s) continue;
-					try {
-						out.push(JSON.parse(s));
-					} catch {
-						/* skip bad line */
-					}
-				}
-			}
-		} catch {
-			/* ignore */
-		}
-		return out;
-	}
-
-	private recIdOf(m: any): string {
-		const notePath = m?.final_paths?.notes || "";
-		return m?.source_id || (notePath ? basename(notePath).replace(/\.md$/, "") : "");
-	}
-
-	private recFromMeta(m: any): MetaRec | null {
-		const recId = this.recIdOf(m);
-		if (!recId) return null;
-		const memory = (m.decisions ?? []).map((d: any) => (typeof d === "string" ? d : d?.decision)).filter((x: any): x is string => !!x && typeof x === "string");
-		const todo = (m.action_items ?? []).map((a: any) => (typeof a === "string" ? a : a?.task)).filter((x: any): x is string => !!x && typeof x === "string");
-		const ideas = (m.open_questions ?? []).map((q: any) => (typeof q === "string" ? q : q?.question)).filter((x: any): x is string => !!x && typeof x === "string");
-		return {
-			recId,
-			title: m.title || "(untitled)",
-			date: m.date || "",
-			time: m.start_time || "",
-			notePath: m?.final_paths?.notes || "",
-			status: "pending",
-			memory,
-			todo,
-			ideas,
-		};
-	}
-
-	private findRawMeta(recId: string): any | undefined {
-		const metas = this.readMeetings();
-		let found: any | undefined;
-		for (const m of metas) if (this.recIdOf(m) === recId) found = m; // keep latest occurrence
-		return found;
-	}
-
-	metaListRecordings(): MetaRec[] {
-		const byId = new Map<string, MetaRec>();
-		for (const m of this.readMeetings()) {
-			const r = this.recFromMeta(m);
-			if (r) byId.set(r.recId, r); // latest occurrence wins
-		}
-		const triage = this.readTriage();
-		const list = [...byId.values()].map((r) => {
-			const t = triage[r.recId];
-			return t ? { ...r, status: t.status, summary: t.summary, projectName: t.projectName } : r;
-		});
-		list.sort((a, b) => `${b.date} ${b.time}`.localeCompare(`${a.date} ${a.time}`));
-		return list;
-	}
-
-	private async projectCwds(): Promise<string[]> {
-		const infos = await SessionManager.listAll();
-		const set = new Set<string>();
-		for (const s of infos) if (s.cwd) set.add(s.cwd);
-		return [...set];
-	}
-	private workspaceName(cwd: string): string {
-		return this.guiSettings.workspaceNames[cwd] || basename(cwd) || cwd;
-	}
-	private readInbox(cwd: string): MetaProjectInbox {
-		const d = this.readJson<Partial<MetaProjectInbox>>(this.inboxPath(cwd), {});
-		return { todo: d.todo ?? [], idea: d.idea ?? [], memory: d.memory ?? [] };
-	}
-	private writeInbox(cwd: string, ib: MetaProjectInbox): void {
-		this.writeJson(this.inboxPath(cwd), ib);
-	}
-	private inboxCount(cwd: string): number {
-		const ib = this.readInbox(cwd);
-		return ib.todo.length + ib.idea.length + ib.memory.length;
-	}
-
-	async metaListProjects(): Promise<MetaProject[]> {
-		const cwds = await this.projectCwds();
-		return cwds
-			.map((cwd) => ({ cwd, name: this.workspaceName(cwd), count: this.inboxCount(cwd) }))
-			.sort((a, b) => a.name.localeCompare(b.name));
-	}
-
-	async metaGetSummary(): Promise<MetaSummary> {
-		const recs = this.metaListRecordings();
-		const pending = recs.filter((r) => r.status === "pending").length;
-		const ideas = this.readJson<MetaInboxItem[]>(this.ideasPath(), []).length;
-		const inboxByCwd: Record<string, number> = {};
-		for (const cwd of await this.projectCwds()) {
-			const n = this.inboxCount(cwd);
-			if (n) inboxByCwd[cwd] = n;
-		}
-		return { pending, ideas, inboxByCwd };
-	}
-
-	metaSetStatus(recId: string, status: MetaStatus): void {
-		const t = this.readTriage();
-		t[recId] = { ...(t[recId] ?? { status }), status };
-		this.writeTriage(t);
-	}
-	metaUndo(recId: string): void {
-		const t = this.readTriage();
-		delete t[recId];
-		this.writeTriage(t);
-	}
-
-	metaGetInbox(cwd: string): MetaProjectInbox {
-		return this.readInbox(cwd);
-	}
-
-	metaInboxAction(
-		cwd: string,
-		action: "toggleTodo" | "deleteTodo" | "deleteIdea" | "deleteMemory" | "ideaToPool" | "markStarted",
-		index: number,
-	): MetaProjectInbox {
-		const ib = this.readInbox(cwd);
-		if (action === "toggleTodo" && ib.todo[index]) ib.todo[index].done = !ib.todo[index].done;
-		else if (action === "markStarted" && ib.todo[index]) ib.todo[index].started = true;
-		else if (action === "deleteTodo") ib.todo.splice(index, 1);
-		else if (action === "deleteIdea") ib.idea.splice(index, 1);
-		else if (action === "deleteMemory") {
-			const m = ib.memory.splice(index, 1)[0];
-			if (m) this.removeMemoryLine(cwd, m);
-		} else if (action === "ideaToPool") {
-			const it = ib.idea.splice(index, 1)[0];
-			if (it) {
-				const pool = this.readJson<MetaInboxItem[]>(this.ideasPath(), []);
-				pool.push(it);
-				this.writeJson(this.ideasPath(), pool);
-			}
-		}
-		this.writeInbox(cwd, ib);
-		return ib;
-	}
-
-	metaListIdeas(): MetaInboxItem[] {
-		return this.readJson<MetaInboxItem[]>(this.ideasPath(), []);
-	}
-	metaIdeaAction(action: "delete" | "fileToProject", index: number, cwd?: string): MetaInboxItem[] {
-		const pool = this.readJson<MetaInboxItem[]>(this.ideasPath(), []);
-		if (action === "delete") pool.splice(index, 1);
-		else if (action === "fileToProject" && cwd) {
-			const it = pool.splice(index, 1)[0];
-			if (it) {
-				const ib = this.readInbox(cwd);
-				ib.idea.push(it);
-				this.writeInbox(cwd, ib);
-			}
-		}
-		this.writeJson(this.ideasPath(), pool);
-		return pool;
-	}
-
-	metaGetConfig(): { workspace: string } {
-		return { workspace: this.workspaceRoot() };
-	}
-	metaSetWorkspace(path: string): { workspace: string } {
-		this.setGuiSettings({ voicenoteWorkspace: path });
-		return { workspace: this.workspaceRoot() };
-	}
-
-	metaConfirmSort(recId: string, payload: MetaConfirmPayload): void {
-		const rec = this.metaListRecordings().find((r) => r.recId === recId);
-		const src: MetaSrc = {
-			recId,
-			title: rec?.title ?? "",
-			date: rec?.date ?? "",
-			time: rec?.time ?? "",
-			notePath: rec?.notePath ?? "",
-		};
-		const { cwd, projectName, memory, todo, ideas, summary } = payload;
-		if (cwd && (memory.length || todo.length)) {
-			const ib = this.readInbox(cwd);
-			for (const t of todo) ib.todo.push({ text: t, done: false, src });
-			for (const m of memory) ib.memory.push({ text: m, src });
-			this.writeInbox(cwd, ib);
-			if (memory.length) this.appendMemoryLines(cwd, memory, src);
-		}
-		for (const idea of ideas) {
-			if (idea.cwd) {
-				const ib = this.readInbox(idea.cwd);
-				ib.idea.push({ text: idea.text, src });
-				this.writeInbox(idea.cwd, ib);
-			} else {
-				const pool = this.readJson<MetaInboxItem[]>(this.ideasPath(), []);
-				pool.push({ text: idea.text, src });
-				this.writeJson(this.ideasPath(), pool);
-			}
-		}
-		const t = this.readTriage();
-		t[recId] = { status: "processed", projectName, summary };
-		this.writeTriage(t);
-	}
-
-	private memoryMarker(text: string, src: MetaSrc): string {
-		const meta = `${src.recId} | ${src.date} ${src.time} ${(src.title || "").replace(/--+>/g, "")}`.trim();
-		return `- ${text}  <!-- meta-vincent: ${meta} -->`;
-	}
-	private appendMemoryLines(cwd: string, items: string[], src: MetaSrc): void {
-		const p = join(cwd, "AGENTS.md");
-		let cur = "";
-		try {
-			cur = existsSync(p) ? readFileSync(p, "utf8") : "";
-		} catch {
-			cur = "";
-		}
-		const heading = "## Memory from recordings";
-		let add = "";
-		if (!cur.includes(heading)) add += `${cur && !cur.endsWith("\n") ? "\n" : ""}\n${heading}\n`;
-		for (const text of items) add += `${this.memoryMarker(text, src)}\n`;
-		try {
-			mkdirSync(dirname(p), { recursive: true });
-			writeFileSync(p, cur + add, "utf8");
-		} catch {
-			/* ignore */
-		}
-	}
-	private removeMemoryLine(cwd: string, item: MetaInboxItem): void {
-		const p = join(cwd, "AGENTS.md");
-		if (!existsSync(p)) return;
-		try {
-			const line = this.memoryMarker(item.text, item.src).trim();
-			const heading = "## Memory from recordings";
-			let kept = readFileSync(p, "utf8")
-				.split("\n")
-				.filter((l) => l.trim() !== line);
-			// If our managed section is now empty, drop the heading too (and any blank
-			// line we inserted before it), restoring the file close to its original.
-			if (!kept.some((l) => l.includes("meta-vincent:"))) {
-				kept = kept.filter((l) => l.trim() !== heading);
-				while (kept.length > 1 && kept[kept.length - 1].trim() === "" && kept[kept.length - 2].trim() === "") kept.pop();
-				if (kept.length && kept[kept.length - 1].trim() === "") kept.pop();
-			}
-			writeFileSync(p, kept.join("\n"), "utf8");
-		} catch {
-			/* ignore */
-		}
-	}
-
-	/** meta-agent: map a messy recording to one of the user's real projects (cwds). */
-	async metaClassify(recId: string): Promise<MetaClassification> {
-		const rec = this.metaListRecordings().find((r) => r.recId === recId);
-		const projects = await this.metaListProjects();
-		const empty: MetaClassification = { ideaCwds: (rec?.ideas ?? []).map(() => undefined) };
-		if (!rec || !projects.length) return empty;
-		const model = this.pickExtractionModel();
-		if (!model) return empty;
-		const raw = this.findRawMeta(recId);
-		const mentions: string[] = Array.isArray(raw?.projects) ? raw.projects : [];
-		const projList = projects.map((p, i) => `${i}. ${p.name}`).join("\n");
-		const ideaList = rec.ideas.map((q, i) => `${i}. ${q}`).join("\n");
-		const keyPoints = [...rec.todo, ...rec.memory].slice(0, 8).join(" | ");
-		const sys =
-			"You route a meeting recording to the user's REAL project list. The recording's own project mentions are messy and may not match the real names. " +
-			"Pick the single best matching project index for the whole recording, and for EACH open question pick the best project index (or -1 if it fits no specific project). " +
-			'Use -1 when nothing matches well. Return STRICT JSON ONLY: {"project": <index|-1>, "ideas": [<index|-1>, ...]} with ideas length equal to the number of open questions. No prose.';
-		const user =
-			`Real projects:\n${projList}\n\n` +
-			`Recording title: ${rec.title}\n` +
-			`Mentioned topics: ${mentions.join(", ")}\n` +
-			`Key points: ${keyPoints}\n\n` +
-			`Open questions (${rec.ideas.length}):\n${ideaList || "(none)"}`;
-		try {
-			const auth = await this.modelRegistry.getApiKeyAndHeaders(model);
-			if (!auth.ok) return empty;
-			const result = await completeSimple(
-				model,
-				{ systemPrompt: sys, messages: [{ role: "user", content: user, timestamp: Date.now() }] },
-				{ apiKey: auth.apiKey, headers: auth.headers, maxTokens: 400 },
-			);
-			const text = (result.content ?? []).filter((c: any) => c.type === "text").map((c: any) => c.text).join("");
-			const parsed = this.parseClassifyJson(text);
-			if (!parsed) return empty;
-			const pick = (i: number): { cwd?: string; name?: string } => {
-				const p = projects[i];
-				return p ? { cwd: p.cwd, name: p.name } : {};
-			};
-			const projSel = pick(parsed.project);
-			const ideaCwds = rec.ideas.map((_q, i) => {
-				const idx = parsed.ideas[i];
-				return typeof idx === "number" && idx >= 0 ? projects[idx]?.cwd : undefined;
-			});
-			return { cwd: projSel.cwd, projectName: projSel.name, ideaCwds };
-		} catch {
-			return empty;
-		}
-	}
-
-	private parseClassifyJson(text: string): { project: number; ideas: number[] } | null {
-		let s = text.trim();
-		const fence = s.match(/```(?:json)?\s*([\s\S]*?)```/);
-		if (fence) s = fence[1].trim();
-		const a = s.indexOf("{");
-		const b = s.lastIndexOf("}");
-		if (a >= 0 && b > a) s = s.slice(a, b + 1);
-		try {
-			const o = JSON.parse(s);
-			const project = typeof o.project === "number" ? o.project : -1;
-			const ideas = Array.isArray(o.ideas) ? o.ideas.map((x: any) => (typeof x === "number" ? x : -1)) : [];
-			return { project, ideas };
-		} catch {
-			return null;
-		}
-	}
 }

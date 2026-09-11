@@ -1,7 +1,8 @@
 // Shared IPC contract types between main and renderer.
 // Kept dependency-free so both sides can import without pulling in the SDK.
 
-export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+// "max" was added by pi 0.85 and is supported by the Claude 5 family.
+export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 export interface TextContent {
 	type: "text";
@@ -196,73 +197,6 @@ export interface GuiSettings {
 	sidebarWidth: number;
 	rightPanelWidth: number;
 	sidebarCollapsed: boolean;
-	voicenoteWorkspace?: string; // where Meta Vincent reads recordings (default ~/Documents/meetings)
-}
-
-// -------------------------------------------------------- Meta Vincent
-
-export type MetaStatus = "pending" | "processed" | "snoozed" | "hidden";
-
-export interface MetaRec {
-	recId: string;
-	title: string;
-	date: string; // YYYY-MM-DD
-	time: string; // HH:MM
-	notePath: string;
-	status: MetaStatus;
-	summary?: string; // for processed: "2 to-do · 1 idea"
-	projectName?: string; // display name it was sorted into
-	memory: string[]; // decisions -> Memory candidates
-	todo: string[]; // action_items -> To-do candidates
-	ideas: string[]; // open_questions -> Ideas candidates
-}
-
-export interface MetaProject {
-	cwd: string;
-	name: string;
-	count: number; // inbox items sorted into it
-}
-
-export interface MetaSrc {
-	recId: string;
-	title: string;
-	date: string;
-	time: string;
-	notePath: string;
-}
-
-export interface MetaInboxItem {
-	text: string;
-	done?: boolean;
-	started?: boolean;
-	src: MetaSrc;
-}
-
-export interface MetaProjectInbox {
-	todo: MetaInboxItem[];
-	idea: MetaInboxItem[];
-	memory: MetaInboxItem[];
-}
-
-export interface MetaClassification {
-	cwd?: string; // suggested project cwd, or undefined for no match
-	projectName?: string;
-	ideaCwds: (string | undefined)[]; // per open_question: suggested project cwd, or undefined (=> Ideas pool)
-}
-
-export interface MetaSummary {
-	pending: number;
-	ideas: number;
-	inboxByCwd: Record<string, number>;
-}
-
-export interface MetaConfirmPayload {
-	cwd: string; // target project cwd ("" if only ideas to pool)
-	projectName: string;
-	memory: string[];
-	todo: string[];
-	ideas: { text: string; cwd?: string }[]; // cwd undefined => Ideas pool
-	summary: string;
 }
 
 export interface UpdateCheck {
@@ -353,7 +287,7 @@ export interface PiApi {
 	getAccounts(): Promise<AccountInfo[]>;
 	loginAccount(id: string): Promise<{ ok: boolean; error?: string }>;
 	logoutAccount(id: string): Promise<void>;
-	getUsage(): Promise<UsageInfo>;
+	getUsage(force?: boolean): Promise<UsageInfo>;
 	readFile(path: string): Promise<string>;
 	readMemory(cwd?: string): Promise<string>;
 	writeMemory(content: string, cwd?: string): Promise<void>;
@@ -372,27 +306,6 @@ export interface PiApi {
 	getVersion(): Promise<string>;
 	checkForUpdate(): Promise<UpdateCheck>;
 	installUpdate(url: string): Promise<void>;
-	// meta vincent
-	metaListRecordings(): Promise<MetaRec[]>;
-	metaGetSummary(): Promise<MetaSummary>;
-	metaSetStatus(recId: string, status: MetaStatus): Promise<void>;
-	metaUndo(recId: string): Promise<void>;
-	metaClassify(recId: string): Promise<MetaClassification>;
-	metaConfirmSort(recId: string, payload: MetaConfirmPayload): Promise<void>;
-	metaListProjects(): Promise<MetaProject[]>;
-	metaGetInbox(cwd: string): Promise<MetaProjectInbox>;
-	metaInboxAction(
-		cwd: string,
-		action: "toggleTodo" | "deleteTodo" | "deleteIdea" | "deleteMemory" | "ideaToPool" | "markStarted",
-		index: number,
-	): Promise<MetaProjectInbox>;
-	metaListIdeas(): Promise<MetaInboxItem[]>;
-	metaIdeaAction(action: "delete" | "fileToProject", index: number, cwd?: string): Promise<MetaInboxItem[]>;
-	metaGetConfig(): Promise<{ workspace: string }>;
-	metaSetWorkspace(path: string): Promise<{ workspace: string }>;
-	metaExportHtml(html: string, name: string): Promise<{ ok: boolean; error?: string }>;
-	metaExportPng(html: string, name: string): Promise<{ ok: boolean; error?: string }>;
-	metaShareLink(html: string): Promise<{ ok: boolean; url?: string; error?: string }>;
 	// misc
 	pickDirectory(): Promise<string | undefined>;
 	getHome(): Promise<string>;
