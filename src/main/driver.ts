@@ -659,12 +659,18 @@ export class Driver {
 			const json: any = await res.json();
 			for (const m of json?.models ?? []) {
 				if (!m?.slug) continue;
+				// Codex reports a default window plus a larger ceiling that only counts
+				// when the account has the experimental context enabled.
+				const window =
+					m.supports_experimental_context === true && typeof m.max_context_window === "number"
+						? m.max_context_window
+						: m.context_window;
 				out.set(m.slug, {
 					provider: "openai-codex",
 					id: m.slug,
 					name: m.title || m.slug,
 					reasoning: Array.isArray(m.supported_reasoning_levels) ? m.supported_reasoning_levels.length > 0 : true,
-					contextWindow: typeof m.context_window === "number" ? m.context_window : undefined,
+					contextWindow: typeof window === "number" ? window : undefined,
 					maxTokens: typeof m.max_output_tokens === "number" ? m.max_output_tokens : undefined,
 					hidden: m.visibility === "hide",
 				});

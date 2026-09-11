@@ -5,7 +5,21 @@
  * working across pi upgrades.
  */
 
+import { Duplex } from "node:stream";
+import { createBrotliDecompress } from "node:zlib";
+
 const GZIP_MAGIC = [0x1f, 0x8b];
+
+/** Provider payloads always start as text (JSON or SSE), so anything else is compressed. */
+function looksTextual(chunk: Uint8Array | undefined): boolean {
+	if (!chunk || chunk.length === 0) return true;
+	try {
+		const head = new TextDecoder("utf-8", { fatal: true }).decode(chunk.slice(0, 64));
+		return /^[\s{["\w:-]/.test(head);
+	} catch {
+		return false;
+	}
+}
 
 /**
  * Some local HTTPS proxies gzip streamed provider responses and strip
@@ -47,7 +61,15 @@ export function installStreamDecompressionFix(): void {
 			});
 
 			const gzipped = !!head && head.length > 1 && head[0] === GZIP_MAGIC[0] && head[1] === GZIP_MAGIC[1];
-			const body = gzipped ? replay.pipeThrough(new DecompressionStream("gzip") as any) : replay;
+			// Brotli has no magic number; treat non-text bodies as brotli, which is what
+			// proxies fall back to when they strip content-encoding.
+			const brotli = !gzipped && !looksTextual(head);
+			let body: ReadableStream<Uint8Array> = replay;
+			if (gzipped) {
+				body = replay.pipeThrough(new DecompressionStream("gzip") as any);
+			} else if (brotli) {
+				body = replay.pipeThrough(Duplex.toWeb(createBrotliDecompress()) as any) as ReadableStream<Uint8Array>;
+			}
 			return new Response(body as any, {
 				status: response.status,
 				statusText: response.statusText,
