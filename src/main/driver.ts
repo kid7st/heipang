@@ -659,10 +659,12 @@ export class Driver {
 			const json: any = await res.json();
 			for (const m of json?.models ?? []) {
 				if (!m?.slug) continue;
-				// Codex reports a default window plus a larger ceiling that only counts
-				// when the account has the experimental context enabled.
+				// `context_window` is only the Codex CLI's default truncation point, not a
+				// hard limit: GPT-5.6 Sol has completed turns well past it. Use the larger
+				// `max_context_window` so auto-compaction does not fire hundreds of
+				// thousands of tokens early.
 				const window =
-					m.supports_experimental_context === true && typeof m.max_context_window === "number"
+					typeof m.max_context_window === "number" && m.max_context_window > (m.context_window ?? 0)
 						? m.max_context_window
 						: m.context_window;
 				out.set(m.slug, {
