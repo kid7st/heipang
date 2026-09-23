@@ -56,6 +56,12 @@ const DEFAULT_GUI_SETTINGS: GuiSettings = {
 	sidebarCollapsed: false,
 };
 
+// Anthropic gates new models on the Claude Code client version pi announces.
+// pi 0.85 hardcodes an older one, so HEIPANG sends its own and raises it
+// automatically when Anthropic asks for a newer client.
+const DEFAULT_CLAUDE_CODE_VERSION = "2.1.280";
+const CLAUDE_CODE_VERSION_REQUIRED = /version (\d+\.\d+\.\d+) or newer is required/i;
+
 const MAX_TASK_LEN = 20;
 function capTitle(s: string): string {
 	const t = s.trim().replace(/\s+/g, " ");
@@ -229,6 +235,8 @@ export class Driver {
 	private extracting = false;
 	private lastExtractUserCount = -1;
 	oauthBridge?: OAuthBridge;
+
+	private claudeCodeVersion = DEFAULT_CLAUDE_CODE_VERSION;
 
 	private sentUiCount = 0;
 	private msgFlushTimer?: ReturnType<typeof setTimeout>;
@@ -955,6 +963,22 @@ export class Driver {
 		this.guiRetryAttempt.delete(sessionId);
 	}
 
+	/** Claude Code identity headers; empty for non-Anthropic models. */
+	private anthropicClientHeaders(model: any): Record<string, string> {
+		if (model?.provider !== "anthropic") return {};
+		return { "user-agent": `claude-cli/${this.claudeCodeVersion}` };
+	}
+
+	/** Anthropic names the client version it wants; adopt it so the next try passes. */
+	private adoptRequiredClaudeCodeVersion(message: any): boolean {
+		const match = CLAUDE_CODE_VERSION_REQUIRED.exec(String(message?.errorMessage ?? ""));
+		if (!match) return false;
+		const required = match[1];
+		if (required === this.claudeCodeVersion) return false;
+		this.claudeCodeVersion = required;
+		return true;
+	}
+
 	private lastAssistant(messages: any[]): any | undefined {
 		for (let i = messages.length - 1; i >= 0; i--) {
 			if (messages[i]?.role === "assistant") return messages[i];
@@ -971,6 +995,17 @@ export class Driver {
 		const sessionId = session.sessionId;
 		if (this.cancelledRuns.has(sessionId) || this.guiRetryTimers.has(sessionId)) return;
 		const last = this.lastAssistant(session.messages as any[]);
+		if (this.adoptRequiredClaudeCodeVersion(last)) {
+			this.onError?.(`Anthropic requires a newer Claude Code client; retrying as ${this.claudeCodeVersion}`);
+			this.guiRetryAttempt.delete(sessionId);
+			const timer = setTimeout(() => {
+				this.guiRetryTimers.delete(sessionId);
+				if (this.cancelledRuns.has(sessionId)) return;
+				void session.agent.continue().catch(() => {});
+			}, 250);
+			this.guiRetryTimers.set(sessionId, timer);
+			return;
+		}
 		if (!this.isRetryableAssistantError(last)) {
 			this.guiRetryAttempt.delete(sessionId);
 			return;
@@ -1348,7 +1383,7 @@ export class Driver {
 			const result = await (await this.runtime()).completeSimple(
 				model,
 				{ systemPrompt: sys, messages: [{ role: "user", content: user, timestamp: Date.now() }] },
-				{ maxTokens: 1024 },
+				{ maxTokens: 1024, headers: this.anthropicClientHeaders(model) },
 			);
 			const text = (result.content ?? []).filter((c: any) => c.type === "text").map((c: any) => c.text).join("");
 			// Bail out if the user switched sessions while we were summarizing, so we
@@ -1700,7 +1735,11 @@ export class Driver {
 		// already surfaced in the GUI.
 		const previousStream = session.agent.streamFunction;
 		session.agent.streamFunction = (model: any, context: any, options: any) =>
-			previousStream(model, context, { ...options, maxRetries: 0 });
+			previousStream(model, context, {
+				...options,
+				maxRetries: 0,
+				headers: { ...options?.headers, ...this.anthropicClientHeaders(model) },
+			});
 		// Also cap provider-requested backoff so a long Retry-After cannot pin the UI.
 		session.agent.maxRetryDelayMs = 30_000;
 
