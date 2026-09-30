@@ -1,6 +1,6 @@
 {
   "name": "heipang",
-  "version": "0.3.3",
+  "version": "0.4.0",
   "description": "HEIPANG — fast, model-agnostic desktop GUI for pi",
   "main": "./out/main/index.js",
   "author": "elylyly",
@@ -20,10 +20,10 @@
     "pack:meta:win": "electron-vite build && electron-builder --config electron-builder.meta.yml --win --x64"
   },
   "dependencies": {
-    "@earendil-works/pi-agent-core": "^0.85.1",
-    "@earendil-works/pi-ai": "^0.85.1",
-    "@earendil-works/pi-coding-agent": "^0.85.1",
-    "@earendil-works/pi-tui": "^0.85.1"
+    "@earendil-works/pi-agent-core": "^0.99.1",
+    "@earendil-works/pi-ai": "^0.99.1",
+    "@earendil-works/pi-coding-agent": "^0.99.1",
+    "@earendil-works/pi-tui": "^0.99.1"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

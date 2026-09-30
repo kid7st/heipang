@@ -166,7 +166,7 @@ interface CatalogModel {
 	maxTokens?: number;
 }
 // Codex only returns its newest models when the caller looks like a current CLI.
-const CODEX_CLIENT_VERSION = "0.153.4";
+const CODEX_CLIENT_VERSION = "0.170.0";
 const ANTHROPIC_FLOOR: [number, number] = [4, 7];
 const OPENAI_FLOOR: [number, number] = [5, 5];
 function anthropicVer(id: string): [number, number] {
