@@ -7,7 +7,10 @@ export default defineConfig({
 		plugins: [externalizeDepsPlugin()],
 		build: {
 			rollupOptions: {
-				input: { index: resolve(__dirname, "src/main/index.ts") },
+				input: {
+					index: resolve(__dirname, "src/main/index.ts"),
+					"session-index-worker": resolve(__dirname, "src/main/session-index-worker.ts"),
+				},
 			},
 		},
 	},

@@ -14,7 +14,7 @@ const GZIP_MAGIC = [0x1f, 0x8b];
 function looksTextual(chunk: Uint8Array | undefined): boolean {
 	if (!chunk || chunk.length === 0) return true;
 	try {
-		const head = new TextDecoder("utf-8", { fatal: true }).decode(chunk.slice(0, 64));
+		const head = new TextDecoder("utf-8", { fatal: true }).decode(chunk.slice(0, 64), { stream: true });
 		return /^[\s{["\w:-]/.test(head);
 	} catch {
 		return false;
@@ -33,13 +33,21 @@ export function installStreamDecompressionFix(): void {
 	(globalThis as any).__heipangGzipFix = true;
 
 	globalThis.fetch = (async (input: any, init?: any) => {
+		const url = String(typeof input === "string" || input instanceof URL ? input : input?.url ?? "");
+		const providerResponse = /^https:\/\/(api\.anthropic\.com\/v1\/|chatgpt\.com\/backend-api\/)/.test(url);
 		const response = await original(input as any, init as any);
+		// Never reinterpret webpage images, downloads, or arbitrary extension fetches
+		// as Brotli. Normal provider responses are already decoded by fetch.
+		if (!providerResponse) return response;
 		try {
 			if (!response.body || response.headers.get("content-encoding")) return response;
+			if (/(application\/json|text\/)/i.test(response.headers.get("content-type") ?? "")) return response;
 			if (typeof DecompressionStream !== "function") return response;
 
 			const reader = response.body.getReader();
-			const first = await reader.read();
+			let first: ReadableStreamReadResult<Uint8Array>;
+			try { first = await reader.read(); }
+			catch (error) { reader.releaseLock(); throw error; }
 			const head = first.value as Uint8Array | undefined;
 			const replay = new ReadableStream<Uint8Array>({
 				start(controller) {
@@ -70,11 +78,14 @@ export function installStreamDecompressionFix(): void {
 			} else if (brotli) {
 				body = replay.pipeThrough(Duplex.toWeb(createBrotliDecompress()) as any) as ReadableStream<Uint8Array>;
 			}
-			return new Response(body as any, {
-				status: response.status,
-				statusText: response.statusText,
-				headers: response.headers,
+			const headers = new Headers(response.headers);
+			if (gzipped || brotli) headers.delete("content-length");
+			const decoded = new Response(body as any, {
+				status: response.status, statusText: response.statusText, headers,
 			});
+			Object.defineProperty(decoded, "url", { value: response.url });
+			Object.defineProperty(decoded, "redirected", { value: response.redirected });
+			return decoded;
 		} catch {
 			return response;
 		}

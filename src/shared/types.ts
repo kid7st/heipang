@@ -223,6 +223,7 @@ export interface ActiveState {
 	model?: { provider: string; id: string; name: string };
 	thinkingLevel: ThinkingLevel;
 	isStreaming: boolean;
+	isCompacting?: boolean;
 	isRetrying?: boolean;
 	retryAttempt?: number;
 	contextPct?: number; // % of the model's context window currently used

@@ -1,11 +1,11 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
+import { Worker } from "node:worker_threads";
 import { basename, dirname, join } from "node:path";
 import { nativeImage } from "electron";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import {
 	AgentSession,
-	calculateContextTokens,
 	createAgentSession,
 	DefaultResourceLoader,
 	getAgentDir,
@@ -15,6 +15,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { AuthPrompt, Model } from "@earendil-works/pi-ai";
 import { convertPdfAttachments } from "./provider-compat.js";
+import { measuredStream } from "./request-stream.js";
 import type {
 	AccountInfo,
 	ActiveState,
@@ -227,6 +228,9 @@ export class Driver {
 	// the result so startup/event bursts never rescan hundreds of MB repeatedly.
 	private sessionListCache?: SessionListItem[];
 	private sessionListInflight?: Promise<SessionListItem[]>;
+	private sessionIndexWorker?: Worker;
+	private contextCache?: { sessionId: string; value: number | undefined };
+	private lastStateKey = "";
 
 	// task state for the active session
 	private savedTasks: Task[] = [];
@@ -239,6 +243,8 @@ export class Driver {
 	private claudeCodeVersion = DEFAULT_CLAUDE_CODE_VERSION;
 
 	private sentUiCount = 0;
+	private sentRawCount = 0;
+	private sentTailUiCount = 0;
 	private msgFlushTimer?: ReturnType<typeof setTimeout>;
 
 	// live-usage cache (the upstream usage endpoints rate-limit aggressively → 429)
@@ -273,8 +279,6 @@ export class Driver {
 	// A manual stop must also suppress retries which are created just after the
 	// provider/agent emits its final error event. Cleared by the next user send.
 	private cancelledRuns = new Set<string>();
-	private static readonly GUI_RETRY_MAX = 3;
-	private static readonly GUI_RETRY_BASE_DELAY_MS = 2500;
 
 	// Remote "latest models" catalog (weekly stale-while-revalidate refresh).
 	private catalogMem?: { fetchedAt: number; models: CatalogModel[] };
@@ -287,6 +291,13 @@ export class Driver {
 		this.agentDir = getAgentDir();
 		this.modelRuntimePromise = this.createModelRuntime();
 		this.settings = SettingsManager.create(homedir(), this.agentDir);
+		// Bound recovery per application without changing shared CLI settings.
+		const retrySettings = this.settings.getRetrySettings.bind(this.settings);
+		this.settings.getRetrySettings = () => {
+			const policy = retrySettings();
+			return { ...policy, maxRetries: Math.min(policy.maxRetries, 2) };
+		};
+		this.settings.getHttpIdleTimeoutMs = () => 120_000;
 		this.resourceLoader = new DefaultResourceLoader({
 			cwd: homedir(),
 			agentDir: this.agentDir,
@@ -842,24 +853,26 @@ export class Driver {
 	async listSessions(): Promise<SessionListItem[]> {
 		if (this.sessionListCache) return this.sessionListCache;
 		if (this.sessionListInflight) return this.sessionListInflight;
-		this.sessionListInflight = (async () => {
-			const infos = await SessionManager.listAll();
-			const result = infos.map((s) => ({
-				path: s.path,
-				id: s.id,
-				cwd: s.cwd,
-				name: s.name,
-				created: s.created.getTime(),
-				modified: s.modified.getTime(),
-				messageCount: s.messageCount,
-				firstMessage: s.firstMessage,
-				allMessagesText: s.allMessagesText,
-			}));
-			this.sessionListCache = result;
-			return result;
-		})().finally(() => {
-			this.sessionListInflight = undefined;
-		});
+		if (!this.sessionIndexWorker) {
+			this.sessionIndexWorker = new Worker(join(__dirname, "session-index-worker.js"), {
+				workerData: { sessionDir: join(this.agentDir, "sessions") },
+			});
+			this.sessionIndexWorker.unref();
+		}
+		const worker = this.sessionIndexWorker;
+		this.sessionListInflight = new Promise<SessionListItem[]>((resolve, reject) => {
+			const cleanup = () => { worker.off("message", onMessage); worker.off("error", onError); };
+			const onMessage = (result: { items?: SessionListItem[]; error?: string }) => {
+				cleanup();
+				if (result.error) { reject(new Error(result.error)); return; }
+				this.sessionListCache = result.items ?? [];
+				resolve(this.sessionListCache);
+			};
+			const onError = (error: Error) => { cleanup(); this.sessionIndexWorker = undefined; reject(error); };
+			worker.once("message", onMessage);
+			worker.once("error", onError);
+			worker.postMessage("scan");
+		}).finally(() => { this.sessionListInflight = undefined; });
 		return this.sessionListInflight;
 	}
 
@@ -909,14 +922,13 @@ export class Driver {
 
 	private computeContextPct(): number | undefined {
 		if (!this.session?.model?.contextWindow) return undefined;
-		const msgs = this.session.messages as any[];
-		for (let i = msgs.length - 1; i >= 0; i--) {
-			if (msgs[i].role === "assistant" && msgs[i].usage) {
-				const tokens = calculateContextTokens(msgs[i].usage);
-				return Math.min(100, Math.round((tokens / this.session.model.contextWindow) * 100));
-			}
-		}
-		return 0;
+		if (this.contextCache?.sessionId === this.session.sessionId) return this.contextCache.value;
+		// The SDK accounts for compaction boundaries, omitted failed attempts and
+		// new tool output. A zero-usage error must not reset the counter to zero.
+		const usage = this.session.getContextUsage();
+		const value = usage?.percent == null ? undefined : Math.min(100, Math.round(usage.percent));
+		this.contextCache = { sessionId: this.session.sessionId, value };
+		return value;
 	}
 
 	getActiveState(): ActiveState | null {
@@ -933,7 +945,8 @@ export class Driver {
 			cwd: this.activeCwd,
 			model: m ? { provider: m.provider, id: m.id, name: m.name } : undefined,
 			thinkingLevel: this.session.thinkingLevel as ThinkingLevel,
-			isStreaming: this.session.isStreaming,
+			isStreaming: this.session.isStreaming || this.session.isCompacting,
+			isCompacting: this.session.isCompacting,
 			isRetrying: sdkRetrying || guiRetrying,
 			retryAttempt: Math.max(sdkRetryAttempt, guiRetryAttempt) || undefined,
 			contextPct: this.computeContextPct(),
@@ -986,11 +999,6 @@ export class Driver {
 		return undefined;
 	}
 
-	private isRetryableAssistantError(message: any): boolean {
-		if (!message || message.stopReason !== "error" || !message.errorMessage) return false;
-		return /overloaded|provider.?returned.?error|rate.?limit|too many requests|429|500|502|503|504|service.?unavailable|server.?error|internal.?error|network.?error|connection.?error|connection.?refused|connection.?lost|websocket.?closed|websocket.?error|other side closed|fetch failed|upstream.?connect|reset before headers|socket hang up|ended without|http2 request did not get a response|timed? out|timeout|terminated|retry delay/i.test(String(message.errorMessage));
-	}
-
 	private scheduleGuiRetry(session: AgentSession): void {
 		const sessionId = session.sessionId;
 		if (this.cancelledRuns.has(sessionId) || this.guiRetryTimers.has(sessionId)) return;
@@ -1006,47 +1014,9 @@ export class Driver {
 			this.guiRetryTimers.set(sessionId, timer);
 			return;
 		}
-		if (!this.isRetryableAssistantError(last)) {
-			this.guiRetryAttempt.delete(sessionId);
-			return;
-		}
-		const attempt = (this.guiRetryAttempt.get(sessionId) ?? 0) + 1;
-		if (attempt > Driver.GUI_RETRY_MAX) {
-			this.clearGuiRetry(sessionId);
-			return;
-		}
-		this.guiRetryAttempt.set(sessionId, attempt);
-		const delayMs = Driver.GUI_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1);
-		const timer = setTimeout(() => {
-			this.guiRetryTimers.delete(sessionId);
-			if (this.cancelledRuns.has(sessionId)) {
-				this.guiRetryAttempt.delete(sessionId);
-				this.emitState();
-				return;
-			}
-			// Give the SDK's built-in retry a chance first. If it has started, don't duplicate it.
-			if ((session as any).isRetrying || session.isStreaming) {
-				this.emitState();
-				return;
-			}
-			const stateMessages = (session.agent.state.messages ?? []) as any[];
-			const stateLast = stateMessages[stateMessages.length - 1];
-			if (!this.isRetryableAssistantError(stateLast)) {
-				this.emitState();
-				return;
-			}
-			// Remove the failed assistant turn from in-memory context and continue from
-			// the same user message. The failed message remains in jsonl history.
-			session.agent.state.messages = stateMessages.slice(0, -1);
-			this.markRunStart(session);
-			this.emitState();
-			session.agent.continue().catch((err: unknown) => {
-				this.onError?.(err instanceof Error ? err.message : String(err));
-			});
-		}, delayMs);
-		this.guiRetryTimers.set(sessionId, timer);
-		this.onError?.(`Retrying after ${last.errorMessage} (${attempt}/${Driver.GUI_RETRY_MAX})`);
-		this.emitState();
+		// The current SDK already recovers transient provider errors. A second
+		// network retry loop multiplies attempts and races persisted context.
+		this.guiRetryAttempt.delete(sessionId);
 	}
 
 	getMessages(): UIMessage[] {
@@ -1071,20 +1041,30 @@ export class Driver {
 					this.emitState();
 					break;
 				case "message_update":
+					this.scheduleEmit();
+					break;
 				case "turn_end":
 					this.scheduleEmit();
 					this.emitState();
 					break;
 				case "message_end":
-					this.invalidateSessionList();
+					this.contextCache = undefined;
 					if ((event as any).message?.role === "assistant" && (event as any).message?.stopReason !== "error" && this.session) {
 						this.clearGuiRetry(this.session.sessionId);
 					}
 					this.flushEmit();
 					this.emitState();
-					this.onSessionUpdated?.(this.session?.sessionFile);
 					break;
-				case "agent_end": {
+				case "agent_end":
+					// The SDK may still retry/compact/drain queued messages. Only the
+					// settlement event means this conversation is finished.
+					this.flushEmit();
+					this.emitState();
+					break;
+				case "agent_settled": {
+					this.invalidateSessionList();
+					this.contextCache = undefined;
+					this.onSessionUpdated?.(this.session?.sessionFile);
 					this.markRunEnd(this.session);
 					this.flushEmit();
 					if (this.session) this.scheduleGuiRetry(this.session);
@@ -1118,6 +1098,8 @@ export class Driver {
 					break;
 				case "compaction_start":
 				case "compaction_end":
+					this.contextCache = undefined;
+					if ((event as any).errorMessage) this.onError?.((event as any).errorMessage);
 					this.flushEmit();
 					this.emitState();
 					break;
@@ -1134,6 +1116,7 @@ export class Driver {
 		this.msgFlushTimer = setTimeout(() => {
 			this.msgFlushTimer = undefined;
 			this.emitMessages();
+			this.emitState();
 		}, 16);
 	}
 
@@ -1147,20 +1130,34 @@ export class Driver {
 
 	private emitMessages(): void {
 		if (!this.session) return;
-		const ui = this.toUIMessages(this.session.messages);
-		if (ui.length < this.sentUiCount) {
-			this.sentUiCount = ui.length;
-			this.onMessages?.(ui); // shrank (compaction/branch) — full resync
+		const messages = this.session.messages;
+		if (messages.length < this.sentRawCount) {
+			const ui = this.toUIMessages(messages);
+			this.resetMessageCursor(ui.length);
+			this.onMessages?.(ui);
 			return;
 		}
-		const from = Math.max(0, this.sentUiCount - 1);
-		this.sentUiCount = ui.length;
-		this.onMessagesPatch?.(from, ui.slice(from));
+		const from = Math.max(0, this.sentUiCount - this.sentTailUiCount);
+		const tail = this.toUIMessages(messages.slice(Math.max(0, this.sentRawCount - 1)));
+		this.sentUiCount = from + tail.length;
+		this.sentRawCount = messages.length;
+		this.sentTailUiCount = this.toUIMessages(messages.slice(-1)).length;
+		this.onMessagesPatch?.(from, tail);
+	}
+
+	private resetMessageCursor(uiCount: number): void {
+		this.sentUiCount = uiCount;
+		this.sentRawCount = this.session?.messages.length ?? 0;
+		this.sentTailUiCount = this.toUIMessages(this.session?.messages.slice(-1) ?? []).length;
 	}
 
 	private emitState(): void {
 		const s = this.getActiveState();
-		if (s) this.onState?.(s);
+		if (!s) return;
+		const key = JSON.stringify(s);
+		if (key === this.lastStateKey) return;
+		this.lastStateKey = key;
+		this.onState?.(s);
 	}
 
 	private disposeSession(): void {
@@ -1179,8 +1176,13 @@ export class Driver {
 	private clearSessionUiState(): void {
 		this.savedTasks = [];
 		this.taskCounter = 0;
+		this.contextCache = undefined;
+		this.lastStateKey = "";
 		this.lastExtractUserCount = -1;
-		this.sentUiCount = 0;
+		this.resetMessageCursor(0);
+		// A fresh attachment must emit the complete transcript once.
+		this.sentRawCount = 0;
+		this.sentTailUiCount = 0;
 		if (this.extractTimer) clearTimeout(this.extractTimer);
 		this.extractTimer = undefined;
 		if (this.msgFlushTimer) clearTimeout(this.msgFlushTimer);
@@ -1201,18 +1203,16 @@ export class Driver {
 	private leaveCurrent(): void {
 		if (!this.session) return;
 		const file = this.session.sessionFile;
-		if (this.session.isStreaming && file && !this.bgSessions.has(file)) {
+		if (!this.session.isIdle && file && !this.bgSessions.has(file)) {
 			const session = this.session;
 			const cwd = this.activeCwd;
 			// drop the UI-coupled subscription; attach a minimal background one
 			this.unsubscribe?.();
 			this.unsubscribe = undefined;
 			const unsub = session.subscribe((event) => {
-				if (event.type === "message_end") {
+				if (event.type === "agent_settled") {
 					this.invalidateSessionList();
 					this.onSessionUpdated?.(file);
-				}
-				if (event.type === "agent_end") {
 					this.markRunEnd(session);
 					this.finishBackground(file);
 				}
@@ -1249,7 +1249,7 @@ export class Driver {
 		this.loadTasks();
 		this.scheduleAutoExtract();
 		const messages = this.getMessages();
-		this.sentUiCount = messages.length;
+		this.resetMessageCursor(messages.length);
 		this.emitBackground();
 		return true;
 	}
@@ -1717,7 +1717,7 @@ export class Driver {
 		this.loadTasks();
 		this.scheduleAutoExtract();
 		const messages = this.getMessages();
-		this.sentUiCount = messages.length;
+		this.resetMessageCursor(messages.length);
 		return { state: this.getActiveState()!, messages, modelFallbackMessage };
 	}
 
@@ -1734,12 +1734,21 @@ export class Driver {
 		// Let AgentSession perform retries instead: its backoff is abortable and is
 		// already surfaced in the GUI.
 		const previousStream = session.agent.streamFunction;
-		session.agent.streamFunction = (model: any, context: any, options: any) =>
-			previousStream(model, context, {
-				...options,
-				maxRetries: 0,
+		session.agent.streamFunction = (model: any, context: any, options: any) => {
+			const idleAbort = model.provider === "openai-codex" ? new AbortController() : undefined;
+			const signal = idleAbort ? (options?.signal
+				? AbortSignal.any([options.signal, idleAbort.signal]) : idleAbort.signal) : options?.signal;
+			const requestOptions = {
+				...options, signal, maxRetries: 0,
+				// Idle timeouts, not a total duration limit: active long answers can
+				// continue. A broken socket must not hold the session for 40 minutes.
+				timeoutMs: model.provider === "openai-codex" ? 120_000 : options?.timeoutMs,
+				websocketConnectTimeoutMs: model.provider === "openai-codex" ? 5_000 : options?.websocketConnectTimeoutMs,
 				headers: { ...options?.headers, ...this.anthropicClientHeaders(model) },
-			});
+			};
+			return measuredStream(previousStream(model, context, requestOptions), model, requestOptions,
+				join(this.agentDir, "heipang-request-timings.jsonl"), idleAbort, options?.signal);
+		};
 		// Also cap provider-requested backoff so a long Retry-After cannot pin the UI.
 		session.agent.maxRetryDelayMs = 30_000;
 
@@ -1770,7 +1779,7 @@ export class Driver {
 		this.wireSession();
 		this.loadTasks();
 		const messages = this.getMessages();
-		this.sentUiCount = messages.length;
+		this.resetMessageCursor(messages.length);
 		return { state: this.getActiveState()!, messages, modelFallbackMessage };
 	}
 
@@ -1818,6 +1827,7 @@ export class Driver {
 		const model = (await this.runtime()).getModel(provider, id) as AnyModel | undefined;
 		if (!model) throw new Error(`Model not found: ${provider}/${id}`);
 		await this.session!.setModel(model);
+		this.contextCache = undefined;
 		this.emitState();
 		return this.getActiveState()!;
 	}

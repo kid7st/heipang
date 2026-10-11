@@ -21,12 +21,14 @@ function fmtDuration(ms: number): string {
  */
 function WorkTimer({
 	isStreaming,
+	isCompacting,
 	isRetrying,
 	retryAttempt,
 	runStartedAt,
 	lastRunMs,
 }: {
 	isStreaming: boolean;
+	isCompacting?: boolean;
 	isRetrying?: boolean;
 	retryAttempt?: number;
 	runStartedAt?: number;
@@ -41,7 +43,10 @@ function WorkTimer({
 		return () => clearInterval(id);
 	}, [isStreaming]);
 
-	if (isRetrying && !isStreaming) {
+	if (isCompacting) {
+		return <span className="hb-timer working" title="Summarizing older context before continuing">Compacting context…</span>;
+	}
+	if (isRetrying) {
 		return <span className="hb-timer working" title="Retrying a transient provider/network failure">Retrying{retryAttempt ? ` #${retryAttempt}` : ""}…</span>;
 	}
 	if (isStreaming && runStartedAt != null) {
@@ -128,6 +133,7 @@ export function HeaderBar({
 			<div className="hb-actions">
 				<WorkTimer
 					isStreaming={!!state?.isStreaming}
+					isCompacting={state?.isCompacting}
 					isRetrying={state?.isRetrying}
 					retryAttempt={state?.retryAttempt}
 					runStartedAt={state?.runStartedAt}

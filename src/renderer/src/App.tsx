@@ -83,7 +83,7 @@ export default function App() {
 	}, []);
 	const sessionRefreshTimers = useRef<ReturnType<typeof setTimeout>[]>([]);
 	const queueRefreshSessions = useCallback(
-		(delays: number[] = [0, 700, 2000, 5000]) => {
+		(delays: number[] = [250]) => {
 			for (const timer of sessionRefreshTimers.current) clearTimeout(timer);
 			sessionRefreshTimers.current = [];
 			for (const delay of delays) {
