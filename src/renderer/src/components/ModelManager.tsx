@@ -87,6 +87,7 @@ export function ModelManager({
 		if (!mId.trim()) return;
 		setBusy(true);
 		const codex = mProvider === "openai-codex";
+		const deepseek = mProvider === "deepseek";
 		await addAndEnable([
 			{
 				provider: mProvider,
@@ -94,7 +95,7 @@ export function ModelManager({
 				name: mName.trim() || mId.trim(),
 				reasoning: true,
 				contextWindow: codex ? (/gpt-5\.6/i.test(mId.trim()) ? 1000000 : 272000) : 1000000,
-				maxTokens: 128000,
+				maxTokens: deepseek ? 384000 : 128000,
 			},
 		]);
 		setBusy(false);
@@ -129,6 +130,7 @@ export function ModelManager({
 							</div>
 							<div className="model-id">{key}</div>
 							{!m.hasAuth && <span className="badge noauth">no auth</span>}
+							{m.id === "deepseek-v4-pro" && <div className="setting-note">Text-only · Separate API billing</div>}
 							<button className="btn btn-sm" onClick={() => removeActive(key)} type="button">
 								Remove
 							</button>
@@ -158,9 +160,10 @@ export function ModelManager({
 					<select value={mProvider} onChange={(e) => setMProvider(e.target.value)}>
 						<option value="anthropic">Claude (anthropic)</option>
 						<option value="openai-codex">ChatGPT (openai-codex)</option>
+						<option value="deepseek">DeepSeek API (deepseek)</option>
 					</select>
 					<input
-						placeholder={mProvider === "openai-codex" ? "model id (e.g. gpt-6)" : "model id (e.g. claude-opus-4-9)"}
+						placeholder={mProvider === "openai-codex" ? "model id (e.g. gpt-6.1-sol)" : mProvider === "deepseek" ? "deepseek-v4-pro" : "model id (e.g. claude-opus-5-5)"}
 						value={mId}
 						onChange={(e) => setMId(e.target.value)}
 					/>

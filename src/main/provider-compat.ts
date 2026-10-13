@@ -34,7 +34,7 @@ export function installStreamDecompressionFix(): void {
 
 	globalThis.fetch = (async (input: any, init?: any) => {
 		const url = String(typeof input === "string" || input instanceof URL ? input : input?.url ?? "");
-		const providerResponse = /^https:\/\/(api\.anthropic\.com\/v1\/|chatgpt\.com\/backend-api\/)/.test(url);
+		const providerResponse = /^https:\/\/(api\.anthropic\.com\/v1\/|chatgpt\.com\/backend-api\/|api\.deepseek\.com\/)/.test(url);
 		const response = await original(input as any, init as any);
 		// Never reinterpret webpage images, downloads, or arbitrary extension fetches
 		// as Brotli. Normal provider responses are already decoded by fetch.

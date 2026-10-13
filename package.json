@@ -1,6 +1,6 @@
 {
   "name": "heipang",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "HEIPANG — fast, model-agnostic desktop GUI for pi",
   "main": "./out/main/index.js",
   "author": "elylyly",
@@ -12,6 +12,7 @@
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json",
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
     "test:performance": "npm run build && node scripts/performance-regression.mjs",
+    "test:deepseek": "node scripts/deepseek-regression.mjs",
     "start": "electron-vite preview",
     "pack:mac": "electron-vite build && electron-builder --mac --arm64",
     "pack:mac:dir": "electron-vite build && electron-builder --mac --arm64 --dir",

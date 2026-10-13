@@ -40,6 +40,9 @@ export function RequestDialog({ req, onClose }: { req: PendingRequest; onClose: 
 					<>
 						<input
 							className="request-input"
+							type={req.kind === "secret" ? "password" : "text"}
+							autoComplete="off"
+							spellCheck={false}
 							value={value}
 							autoFocus
 							placeholder={req.payload?.placeholder ?? ""}

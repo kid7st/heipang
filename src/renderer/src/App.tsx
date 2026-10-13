@@ -356,9 +356,12 @@ export default function App() {
 	);
 
 	const onSetModel = useCallback(async (provider: string, id: string) => {
-		setState(await window.pi.setModel(provider, id));
-		window.pi.getUsage().then(setUsage).catch(() => {});
-	}, []);
+		try {
+			setState(await window.pi.setModel(provider, id));
+			setModels(await window.pi.listModels());
+			window.pi.getUsage().then(setUsage).catch(() => {});
+		} catch (error) { flash(error instanceof Error ? error.message : String(error)); }
+	}, [flash]);
 	const onSetThinking = useCallback(async (level: ThinkingLevel) => {
 		setState(await window.pi.setThinkingLevel(level));
 	}, []);

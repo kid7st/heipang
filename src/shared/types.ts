@@ -72,6 +72,7 @@ export interface ImageAttachment {
 }
 
 export interface ModelInfo {
+	thinkingLevels?: ThinkingLevel[];
 	provider: string;
 	id: string;
 	name: string;
@@ -175,6 +176,7 @@ export interface AccountInfo {
 	id: string;
 	name: string;
 	connected: boolean;
+	authType?: "oauth" | "api_key";
 }
 
 export interface WorkspaceInfo {
@@ -210,6 +212,7 @@ export interface UpdateCheck {
 
 export interface UsageInfo {
 	provider?: string;
+	billing?: "api";
 	fiveHour?: { pct: number; resetsAt: string | null };
 	sevenDay?: { pct: number; resetsAt: string | null };
 	error?: string;

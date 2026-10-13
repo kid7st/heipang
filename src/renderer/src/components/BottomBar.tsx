@@ -23,6 +23,8 @@ function UsagePill({ usage, onRefresh }: { usage: UsageInfo | null; onRefresh: (
 			: undefined;
 	const label = !usage
 		? "usage"
+		: usage.billing === "api"
+			? "API billing"
 		: usage.error
 			? "usage —"
 			: headline
@@ -49,6 +51,7 @@ function UsagePill({ usage, onRefresh }: { usage: UsageInfo | null; onRefresh: (
 						<div className="usage-err">{usage.error}</div>
 					) : (
 						<>
+							{usage.billing === "api" && <div className="usage-line">Uses a separate prepaid API balance, not your Claude or ChatGPT subscription.</div>}
 							{usage.fiveHour && (
 								<div className="usage-line">
 									<span>5-hour</span>
@@ -90,10 +93,12 @@ export function BottomBar({
 	onRefreshUsage: () => void;
 }) {
 	const enabledSet = new Set(models?.enabled ?? []);
-	const pool = (models?.available ?? []).filter((m) =>
-		enabledSet.size > 0 ? enabledSet.has(`${m.provider}/${m.id}`) : true,
-	);
+	const candidates = [...(models?.available ?? []), ...(models?.all ?? [])
+		.filter((m) => m.provider === "deepseek" && !m.hasAuth)];
+	const pool = candidates.filter((m) => enabledSet.size > 0 ? enabledSet.has(`${m.provider}/${m.id}`) : m.hasAuth);
 	const current = state?.model ? `${state.model.provider}/${state.model.id}` : "";
+	const model = models?.all.find((m) => `${m.provider}/${m.id}` === current);
+	const thinking = model?.thinkingLevels ?? THINKING;
 
 	return (
 		<div className="bottombar">
@@ -110,7 +115,7 @@ export function BottomBar({
 				)}
 				{pool.map((m) => (
 					<option key={`${m.provider}/${m.id}`} value={`${m.provider}/${m.id}`}>
-						{m.name}
+						{m.name}{!m.hasAuth ? " (API key required)" : ""}
 					</option>
 				))}
 			</select>
@@ -122,7 +127,7 @@ export function BottomBar({
 				disabled={!state?.model}
 				title="Thinking level"
 			>
-				{THINKING.map((t) => (
+				{thinking.map((t) => (
 					<option key={t} value={t}>
 						{t}
 					</option>

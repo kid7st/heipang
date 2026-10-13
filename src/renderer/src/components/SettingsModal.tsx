@@ -176,11 +176,13 @@ export function SettingsModal({
 		setBusyAccount(null);
 		if (!r.ok && r.error) alert(`Sign-in failed: ${r.error}`);
 		loadAccounts();
+		onModelsChange(await window.pi.listModels());
 	};
 	const disconnect = async (id: string) => {
 		if (!confirm(`Sign out of ${id}?`)) return;
 		await window.pi.logoutAccount(id);
 		loadAccounts();
+		onModelsChange(await window.pi.listModels());
 	};
 
 	return (
@@ -277,12 +279,12 @@ export function SettingsModal({
 									</button>
 								) : (
 									<button className="btn btn-send" onClick={() => connect(a.id)} disabled={busyAccount === a.id} type="button">
-										{busyAccount === a.id ? "Waiting for browser…" : "Sign in"}
+										{busyAccount === a.id ? (a.authType === "api_key" ? "Waiting for API key…" : "Waiting for browser…") : (a.authType === "api_key" ? "Add API key" : "Sign in")}
 									</button>
 								)}
 							</div>
 						))}
-						<div className="setting-note">Sign in opens your browser. Needed to use your Claude / ChatGPT coding plans on this machine.</div>
+						<div className="setting-note">Claude / ChatGPT use browser sign-in. DeepSeek uses its own API key and prepaid API balance, separate from those subscriptions.</div>
 					</div>
 				)}
 

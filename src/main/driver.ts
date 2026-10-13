@@ -14,6 +14,7 @@ import {
 	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import type { AuthPrompt, Model } from "@earendil-works/pi-ai";
+import { getSupportedThinkingLevels } from "@earendil-works/pi-ai/compat";
 import { convertPdfAttachments } from "./provider-compat.js";
 import { measuredStream } from "./request-stream.js";
 import type {
@@ -422,6 +423,7 @@ export class Driver {
 			id: m.id,
 			name: m.name,
 			reasoning: m.reasoning,
+			thinkingLevels: getSupportedThinkingLevels(m) as ThinkingLevel[],
 			contextWindow: m.contextWindow,
 			maxTokens: m.maxTokens,
 			hasAuth,
@@ -489,6 +491,18 @@ export class Driver {
 					// build time with the equivalent model-ID recognition.
 					entry.compat = { forceAdaptiveThinking: true, supportsTemperature: false };
 				}
+			} else if (m.provider === "deepseek") {
+				const catalog = (await this.runtime()).getModel("deepseek", m.id);
+				entry.api = "openai-completions";
+				entry.baseUrl = "https://api.deepseek.com";
+				if (catalog) {
+					entry.compat = catalog.compat;
+					entry.thinkingLevelMap = catalog.thinkingLevelMap;
+					entry.cost = catalog.cost;
+				}
+				// V4 Pro is text-only. Retain reasoning_content across tool turns;
+				// sending an image or dropping reasoning makes the API reject a turn.
+				if (m.id === "deepseek-v4-pro") entry.input = ["text"];
 			} else if (m.provider === "openai-codex") {
 				entry.api = "openai-codex-responses";
 				entry.baseUrl = "https://chatgpt.com/backend-api";
@@ -1512,8 +1526,9 @@ export class Driver {
 		const runtime = await this.runtime();
 		return runtime
 			.getProviders()
-			.filter((p) => p.auth?.oauth && p.id !== "github-copilot") // not used here
-			.map((p) => ({ id: p.id, name: p.name ?? p.id, connected: runtime.hasConfiguredAuth(p.id) }));
+			.filter((p) => (p.auth?.oauth && p.id !== "github-copilot") || p.id === "deepseek")
+			.map((p) => ({ id: p.id, name: p.name ?? p.id, connected: runtime.hasConfiguredAuth(p.id),
+				authType: p.id === "deepseek" ? "api_key" as const : "oauth" as const }));
 	}
 
 	async deleteExtension(path: string): Promise<void> {
@@ -1545,7 +1560,8 @@ export class Driver {
 		const bridge = this.oauthBridge;
 		try {
 			const runtime = await this.runtime();
-			await runtime.login(id, "oauth", {
+			const authType = id === "deepseek" ? "api_key" : "oauth";
+			await runtime.login(id, authType, {
 				notify: (event) => {
 					if (event.type === "auth_url") bridge.openExternal(event.url);
 					if (event.type === "device_code") bridge.openExternal(event.verificationUri);
@@ -1558,8 +1574,26 @@ export class Driver {
 						});
 						return choice ?? "";
 					}
-					const kind = prompt.type === "manual_code" ? "code" : "prompt";
-					return (await bridge.requestInput(kind, { message: prompt.message })) ?? "";
+					const kind = prompt.type === "manual_code" ? "code" : prompt.type === "secret" ? "secret" : "prompt";
+					const input = await bridge.requestInput(kind, {
+						message: prompt.message, placeholder: prompt.placeholder,
+					});
+					if (input == null || !input.trim()) throw new Error("Sign-in cancelled");
+					const value = input.trim();
+					if (id === "deepseek" && prompt.type === "secret") {
+						// Verify before ModelRuntime persists the credential. Never echo a
+						// rejected key or raw server response into errors or logs.
+						const response = await fetch("https://api.deepseek.com/models", {
+							headers: { Authorization: `Bearer ${value}`, Accept: "application/json" },
+							signal: AbortSignal.timeout(15_000),
+						});
+						if (!response.ok) throw new Error(`DeepSeek API key verification failed (HTTP ${response.status})`);
+						const catalog: any = await response.json();
+						if (!catalog.data?.some((model: any) => model.id === "deepseek-v4-pro")) {
+							throw new Error("DeepSeek V4 Pro is not available for this API key");
+						}
+					}
+					return value;
 				},
 			});
 			return { ok: true };
@@ -1600,6 +1634,7 @@ export class Driver {
 	async getUsage(force = false): Promise<UsageInfo> {
 		const provider = this.session?.model?.provider ?? this.settings.getDefaultProvider();
 		if (!provider) return { error: "No active provider" };
+		if (provider === "deepseek") return { provider, billing: "api" };
 		if (provider !== "anthropic" && provider !== "openai-codex") return { provider, error: "Usage not available for this provider" };
 
 		// Serve fresh cache without touching the network (avoids 429 from frequent polling).
@@ -1792,6 +1827,9 @@ export class Driver {
 	async sendMessage(text: string, images?: { data: string; mimeType: string; name?: string }[]): Promise<void> {
 		await this.ensureSession();
 		if (!this.session) throw new Error("No active session");
+		if (this.session.model?.id === "deepseek-v4-pro" && images?.length) {
+			throw new Error("DeepSeek V4 Pro is text-only. Use a vision-capable model for images or PDF attachments.");
+		}
 		this.clearGuiRetry(this.session.sessionId);
 		const imgs = images?.length
 			? images.map((i) => ({ type: "image" as const, data: i.data, mimeType: i.mimeType, name: i.name }))
@@ -1824,9 +1862,20 @@ export class Driver {
 
 	async setModel(provider: string, id: string): Promise<ActiveState> {
 		await this.ensureSession();
-		const model = (await this.runtime()).getModel(provider, id) as AnyModel | undefined;
+		const runtime = await this.runtime();
+		const model = runtime.getModel(provider, id) as AnyModel | undefined;
 		if (!model) throw new Error(`Model not found: ${provider}/${id}`);
+		if (provider === "deepseek" && !runtime.hasConfiguredAuth(provider)) {
+			const connected = await this.loginAccount(provider);
+			if (!connected.ok) throw new Error(connected.error ?? "DeepSeek API key is required");
+		}
+		const previousThinking = this.session!.thinkingLevel;
 		await this.session!.setModel(model);
+		if (provider === "deepseek" && !getSupportedThinkingLevels(model).includes(previousThinking as any)) {
+			// DeepSeek's default is high. Do not silently turn Claude/GPT xhigh into
+			// DeepSeek max, which is substantially more expensive in reasoning time.
+			this.session!.setThinkingLevel("high");
+		}
 		this.contextCache = undefined;
 		this.emitState();
 		return this.getActiveState()!;
