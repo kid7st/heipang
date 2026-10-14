@@ -7,7 +7,7 @@ export interface PendingRequest {
 }
 
 export function RequestDialog({ req, onClose }: { req: PendingRequest; onClose: () => void }) {
-	const [value, setValue] = useState(req.payload?.defaultValue ?? "");
+	const [value, setValue] = useState("");
 
 	const message = req.payload?.message ?? (req.kind === "code" ? "Paste the authorization code" : "Input required");
 	const options: Array<{ id: string; label: string }> = Array.isArray(req.payload?.options) ? req.payload.options : [];

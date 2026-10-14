@@ -39,10 +39,11 @@ driver.runtime = async () => ({
 const result = await driver.loginAccount("antigravity");
 assert.equal(result.ok, true);
 assert.equal(openedUrl, authUrl);
-// The callback-paste box is pre-filled with the login URL (auto-paste)…
-assert.equal(promptPayload.defaultValue, authUrl);
-// …never auto-submitted, and never auto-closed.
+// The login URL is shown in the dialog message (and copied to the clipboard), but
+// the input itself stays empty for the callback URL — never pre-filled, never submitted.
+assert.match(promptPayload.message, /accounts\.google\.com/);
+assert.equal(promptPayload.defaultValue, undefined);
 assert.equal(dismissed, false);
 
 await rm(root, { recursive: true, force: true });
-console.log("PASS: Antigravity OAuth auto-fills the login URL into the paste box without submitting or closing it");
+console.log("PASS: Antigravity OAuth shows the login URL in the dialog, keeps the paste box empty, never auto-submits or auto-closes");

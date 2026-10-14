@@ -1618,13 +1618,15 @@ export class Driver {
 						return choice ?? "";
 					}
 					const kind = prompt.type === "manual_code" ? "code" : prompt.type === "secret" ? "secret" : "prompt";
-					// Auto-fill the callback-paste box with the login URL so it is ready to
-					// copy/open, but never submit on the user's behalf.
 					const isCallbackPaste = prompt.type === "text" && /localhost:51121|oauth-callback/.test(prompt.placeholder ?? "");
+					// Show the login URL alongside the input (it is also in the clipboard and
+					// already open in the browser), but keep the input empty for the callback URL.
+					const message = isCallbackPaste && authUrl
+						? `${prompt.message}\n\nLogin URL (also in clipboard, opened in browser):\n${authUrl}`
+						: prompt.message;
 					const input = await bridge.requestInput(kind, {
-						message: prompt.message,
+						message,
 						placeholder: prompt.placeholder,
-						defaultValue: isCallbackPaste ? authUrl : undefined,
 					});
 					if (input == null || !input.trim()) throw new Error("Sign-in cancelled");
 					const value = input.trim();
