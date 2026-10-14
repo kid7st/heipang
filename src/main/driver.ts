@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, w
 import { homedir } from "node:os";
 import { Worker } from "node:worker_threads";
 import { basename, dirname, join } from "node:path";
-import { nativeImage } from "electron";
+import { clipboard, nativeImage } from "electron";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import {
 	AgentSession,
@@ -217,6 +217,7 @@ export class Driver {
 	// so the runtime is created lazily and awaited by every consumer.
 	private modelRuntimePromise: Promise<ModelRuntime>;
 	private modelRuntimeResolved?: ModelRuntime;
+	private providerWarmupPromise?: Promise<void>;
 	private settings: SettingsManager;
 
 	private resourceLoader: DefaultResourceLoader;
@@ -415,6 +416,35 @@ export class Driver {
 	private reloadModelRuntime(): void {
 		this.modelRuntimeResolved = undefined;
 		this.modelRuntimePromise = this.createModelRuntime();
+		this.providerWarmupPromise = undefined; // re-register extension providers
+	}
+
+	/**
+	 * Extension providers (e.g. Antigravity/Gemini) register into the shared
+	 * ModelRuntime only when an agent session binds its extensions. HEIPANG defers
+	 * session creation, so without this warm-up the provider would be invisible in
+	 * Accounts and the model picker until the user opened a conversation. Bind once
+	 * against a disposable in-memory session; registrations persist in the runtime.
+	 */
+	private async warmExtensionProviders(): Promise<void> {
+		if (this.providerWarmupPromise) return this.providerWarmupPromise;
+		this.providerWarmupPromise = (async () => {
+			// Load extension factories first; provider registrations queue here and are
+			// flushed into the ModelRuntime by the session bind below.
+			await this.resourceLoader.reload();
+			const { session } = await createAgentSession({
+				agentDir: this.agentDir,
+				cwd: homedir(),
+				modelRuntime: await this.runtime(),
+				settingsManager: this.settings,
+				resourceLoader: this.resourceLoader,
+				sessionManager: SessionManager.inMemory(),
+			});
+			session.dispose();
+		})().catch(() => {
+			this.providerWarmupPromise = undefined; // allow a later retry
+		});
+		return this.providerWarmupPromise;
 	}
 
 	private modelToInfo(m: AnyModel, hasAuth: boolean): ModelInfo {
@@ -432,6 +462,7 @@ export class Driver {
 
 	async listModels(): Promise<ModelsPayload> {
 		await this.settings.reload();
+		await this.warmExtensionProviders();
 		const runtime = await this.runtime();
 		const availableModels = await runtime.getAvailable();
 		const availableKeys = new Set(availableModels.map((m) => `${m.provider}/${m.id}`));
@@ -1523,6 +1554,7 @@ export class Driver {
 	// ------------------------------------------------------------- accounts
 
 	async getAccounts(): Promise<AccountInfo[]> {
+		await this.warmExtensionProviders();
 		const runtime = await this.runtime();
 		return runtime
 			.getProviders()
@@ -1563,8 +1595,14 @@ export class Driver {
 			const authType = id === "deepseek" ? "api_key" : "oauth";
 			await runtime.login(id, authType, {
 				notify: (event) => {
-					if (event.type === "auth_url") bridge.openExternal(event.url);
-					if (event.type === "device_code") bridge.openExternal(event.verificationUri);
+					if (event.type === "auth_url") {
+						if (event.url) clipboard.writeText(event.url); // login URL to clipboard
+						bridge.openExternal(event.url);
+					}
+					if (event.type === "device_code" && event.verificationUri) {
+						clipboard.writeText(event.verificationUri);
+						bridge.openExternal(event.verificationUri);
+					}
 				},
 				prompt: async (prompt: AuthPrompt) => {
 					if (prompt.type === "select") {
