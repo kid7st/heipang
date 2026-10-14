@@ -12,22 +12,20 @@ await writeFile(shim, "export const nativeImage = {};\nexport const clipboard = 
 const { Driver } = await createJiti(import.meta.url, { alias: { electron: shim } }).import(resolve("src/main/driver.ts"));
 const driver = Object.create(Driver.prototype);
 
+const authUrl = "https://accounts.google.com/o/oauth2/v2/auth?client_id=x";
 let openedUrl = "";
-let dialogShown = false;
+let promptPayload;
 let dismissed = false;
 driver.oauthBridge = {
 	openExternal: (url) => { openedUrl = url; },
-	requestInput: async (_kind, payload) => { dialogShown = true; return payload.placeholder; },
+	requestInput: async (_kind, payload) => { promptPayload = payload; return payload.placeholder; },
 	dismissInputs: () => { dismissed = true; },
 };
 driver.runtime = async () => ({
 	login: async (providerId, type, interaction) => {
 		assert.equal(providerId, "antigravity");
 		assert.equal(type, "oauth");
-		// The provider opens the Google authorization URL.
-		interaction.notify({ type: "auth_url", url: "https://accounts.google.com/o/oauth2/v2/auth?client_id=x" });
-		// The provider also offers a paste-callback prompt for sign-in that cannot
-		// reach the local callback. HEIPANG must surface that prompt, not hide it.
+		interaction.notify({ type: "auth_url", url: authUrl });
 		const pasted = await interaction.prompt({
 			type: "text",
 			message: "After signing in, paste the full callback URL.",
@@ -40,9 +38,11 @@ driver.runtime = async () => ({
 
 const result = await driver.loginAccount("antigravity");
 assert.equal(result.ok, true);
-assert.match(openedUrl, /accounts\.google\.com/);
-assert.equal(dialogShown, true); // the paste dialog IS offered
-assert.equal(dismissed, true); // and closed after login settles
+assert.equal(openedUrl, authUrl);
+// The callback-paste box is pre-filled with the login URL (auto-paste)…
+assert.equal(promptPayload.defaultValue, authUrl);
+// …never auto-submitted, and never auto-closed.
+assert.equal(dismissed, false);
 
 await rm(root, { recursive: true, force: true });
-console.log("PASS: Antigravity OAuth opens the browser, offers the paste dialog, dismisses it after login");
+console.log("PASS: Antigravity OAuth auto-fills the login URL into the paste box without submitting or closing it");

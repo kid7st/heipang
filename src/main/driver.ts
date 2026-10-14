@@ -1591,13 +1591,17 @@ export class Driver {
 	async loginAccount(id: string): Promise<{ ok: boolean; error?: string }> {
 		if (!this.oauthBridge) return { ok: false, error: "OAuth bridge unavailable" };
 		const bridge = this.oauthBridge;
+		let authUrl = "";
 		try {
 			const runtime = await this.runtime();
 			const authType = id === "deepseek" ? "api_key" : "oauth";
 			await runtime.login(id, authType, {
 				notify: (event) => {
 					if (event.type === "auth_url") {
-						if (event.url) clipboard.writeText(event.url); // login URL to clipboard
+						if (event.url) {
+							authUrl = event.url;
+							clipboard.writeText(event.url); // login URL to clipboard
+						}
 						bridge.openExternal(event.url);
 					}
 					if (event.type === "device_code" && event.verificationUri) {
@@ -1614,8 +1618,13 @@ export class Driver {
 						return choice ?? "";
 					}
 					const kind = prompt.type === "manual_code" ? "code" : prompt.type === "secret" ? "secret" : "prompt";
+					// Auto-fill the callback-paste box with the login URL so it is ready to
+					// copy/open, but never submit on the user's behalf.
+					const isCallbackPaste = prompt.type === "text" && /localhost:51121|oauth-callback/.test(prompt.placeholder ?? "");
 					const input = await bridge.requestInput(kind, {
-						message: prompt.message, placeholder: prompt.placeholder,
+						message: prompt.message,
+						placeholder: prompt.placeholder,
+						defaultValue: isCallbackPaste ? authUrl : undefined,
 					});
 					if (input == null || !input.trim()) throw new Error("Sign-in cancelled");
 					const value = input.trim();
@@ -1635,12 +1644,8 @@ export class Driver {
 					return value;
 				},
 			});
-			// The local callback may have completed while a paste prompt was still
-			// open; close any leftover dialog.
-			bridge.dismissInputs();
 			return { ok: true };
 		} catch (err) {
-			bridge.dismissInputs();
 			return { ok: false, error: err instanceof Error ? err.message : String(err) };
 		}
 	}
