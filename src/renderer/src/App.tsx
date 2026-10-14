@@ -167,6 +167,7 @@ export default function App() {
 	}, [flash, queueRefreshSessions]);
 
 	useEffect(() => window.pi.onRequest((req) => setRequest(req)), []);
+	useEffect(() => window.pi.onRequestDismiss(() => setRequest(null)), []);
 
 	// Copy as PLAIN TEXT only (no bubble/code background or other HTML formatting
 	// leaks into the clipboard). Links are kept as readable text + URL.

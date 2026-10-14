@@ -8,34 +8,32 @@ import { tmpdir } from "node:os";
 // The test only verifies HEIPANG's Antigravity OAuth wiring.
 const root = await mkdtemp(join(tmpdir(), "heipang-antigravity-test-"));
 const shim = join(root, "electron.mjs");
-let clipboardText = "";
-await writeFile(shim, `export const nativeImage = {};\nexport const clipboard = { writeText: (t) => { globalThis.__clipboardText = t; } };\n`);
+await writeFile(shim, "export const nativeImage = {};\nexport const clipboard = { writeText: () => {} };\n");
 const { Driver } = await createJiti(import.meta.url, { alias: { electron: shim } }).import(resolve("src/main/driver.ts"));
 const driver = Object.create(Driver.prototype);
 
 let openedUrl = "";
 let dialogShown = false;
+let dismissed = false;
 driver.oauthBridge = {
 	openExternal: (url) => { openedUrl = url; },
-	requestInput: async () => { dialogShown = true; return undefined; },
+	requestInput: async (_kind, payload) => { dialogShown = true; return payload.placeholder; },
+	dismissInputs: () => { dismissed = true; },
 };
 driver.runtime = async () => ({
 	login: async (providerId, type, interaction) => {
 		assert.equal(providerId, "antigravity");
 		assert.equal(type, "oauth");
 		// The provider opens the Google authorization URL.
-		interaction.notify({ type: "auth_url", url: "https://accounts.google.com/o/oauth2/v2/auth?client_id=x" });		// The provider also races a "paste the callback URL" prompt for headless
-		// use. HEIPANG is same-machine: it must cancel that path, not show a dialog.
-		try {
-			await interaction.prompt({
-				type: "text",
-				message: "Remote/headless machine? After signing in, paste the full callback URL.",
-				placeholder: "http://localhost:51121/oauth-callback?state=abc&code=def",
-			});
-			assert.fail("paste-callback prompt must be suppressed");
-		} catch (error) {
-			assert.equal(error.message, "Use browser sign-in");
-		}
+		interaction.notify({ type: "auth_url", url: "https://accounts.google.com/o/oauth2/v2/auth?client_id=x" });
+		// The provider also offers a paste-callback prompt for sign-in that cannot
+		// reach the local callback. HEIPANG must surface that prompt, not hide it.
+		const pasted = await interaction.prompt({
+			type: "text",
+			message: "After signing in, paste the full callback URL.",
+			placeholder: "http://localhost:51121/oauth-callback?state=abc&code=def",
+		});
+		assert.equal(pasted, "http://localhost:51121/oauth-callback?state=abc&code=def");
 		return { type: "oauth" };
 	},
 });
@@ -43,8 +41,8 @@ driver.runtime = async () => ({
 const result = await driver.loginAccount("antigravity");
 assert.equal(result.ok, true);
 assert.match(openedUrl, /accounts\.google\.com/);
-assert.equal(dialogShown, false);
-assert.equal(globalThis.__clipboardText, "https://accounts.google.com/o/oauth2/v2/auth?client_id=x");
+assert.equal(dialogShown, true); // the paste dialog IS offered
+assert.equal(dismissed, true); // and closed after login settles
 
 await rm(root, { recursive: true, force: true });
-console.log("PASS: Antigravity OAuth opens the browser, copies the URL to the clipboard, suppresses the paste dialog");
+console.log("PASS: Antigravity OAuth opens the browser, offers the paste dialog, dismisses it after login");

@@ -41,6 +41,11 @@ const api: PiApi = {
 		ipcRenderer.on("pi:request", listener);
 		return () => ipcRenderer.removeListener("pi:request", listener);
 	},
+	onRequestDismiss: (cb: () => void) => {
+		const listener = () => cb();
+		ipcRenderer.on("pi:request-dismiss", listener);
+		return () => ipcRenderer.removeListener("pi:request-dismiss", listener);
+	},
 
 	getResources: () => ipcRenderer.invoke("pi:getResources"),
 	getPiSettings: () => ipcRenderer.invoke("pi:getPiSettings"),

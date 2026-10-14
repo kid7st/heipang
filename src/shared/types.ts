@@ -298,6 +298,7 @@ export interface PiApi {
 	deleteExtension(path: string): Promise<void>;
 	deleteSkill(filePath: string): Promise<void>;
 	onRequest(cb: (req: { id: string; kind: string; payload: any }) => void): () => void;
+	onRequestDismiss(cb: () => void): () => void;
 	respondRequest(id: string, value: string | undefined): void;
 	// resources & settings
 	getResources(): Promise<ResourcesPayload>;

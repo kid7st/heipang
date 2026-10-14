@@ -1,6 +1,6 @@
 {
   "name": "heipang",
-  "version": "0.4.5",
+  "version": "0.4.6",
   "description": "HEIPANG — fast, model-agnostic desktop GUI for pi",
   "main": "./out/main/index.js",
   "author": "elylyly",

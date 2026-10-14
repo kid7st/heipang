@@ -46,7 +46,7 @@ const { Driver } = await createJiti(import.meta.url, { alias: { electron: shim }
 const driver = Object.create(Driver.prototype);
 let persisted = false;
 let secretKind;
-driver.oauthBridge = { requestInput: async (kind) => { secretKind = kind; return "fixture-key"; } };
+driver.oauthBridge = { requestInput: async (kind) => { secretKind = kind; return "fixture-key"; }, dismissInputs: () => {}, openExternal: () => {} };
 driver.runtime = async () => ({
 	login: async (_id, type, interaction) => {
 		assert.equal(type, "api_key");

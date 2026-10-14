@@ -40,6 +40,7 @@ import type {
 export interface OAuthBridge {
 	openExternal: (url: string) => void;
 	requestInput: (kind: string, payload: unknown) => Promise<string | undefined>;
+	dismissInputs: () => void;
 }
 
 const BUILTIN_COMMANDS: CommandInfo[] = [
@@ -1612,13 +1613,6 @@ export class Driver {
 						});
 						return choice ?? "";
 					}
-					// Antigravity sign-in runs a local callback server: the browser redirect
-					// is captured automatically on this machine. The "paste callback URL"
-					// prompt is only for remote/headless use, so cancel it instead of
-					// opening a confusing dialog in the middle of Google sign-in.
-					if (prompt.type === "text" && /localhost:51121|oauth-callback|paste the full callback/i.test(`${prompt.placeholder ?? ""} ${prompt.message ?? ""}`)) {
-						throw new Error("Use browser sign-in");
-					}
 					const kind = prompt.type === "manual_code" ? "code" : prompt.type === "secret" ? "secret" : "prompt";
 					const input = await bridge.requestInput(kind, {
 						message: prompt.message, placeholder: prompt.placeholder,
@@ -1641,8 +1635,12 @@ export class Driver {
 					return value;
 				},
 			});
+			// The local callback may have completed while a paste prompt was still
+			// open; close any leftover dialog.
+			bridge.dismissInputs();
 			return { ok: true };
 		} catch (err) {
+			bridge.dismissInputs();
 			return { ok: false, error: err instanceof Error ? err.message : String(err) };
 		}
 	}

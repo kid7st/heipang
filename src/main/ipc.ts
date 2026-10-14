@@ -28,6 +28,15 @@ export function registerIpc(driver: Driver, getWindow: () => BrowserWindow | nul
 			win.webContents.send("pi:request", { id, kind, payload });
 		});
 	};
+	// OAuth flows race a manual paste prompt against a local callback server. When
+	// the browser redirect completes first, resolve and close any still-open prompt.
+	const dismissInputs = () => {
+		if (pendingRequests.size === 0) return;
+		for (const resolve of pendingRequests.values()) resolve(undefined);
+		pendingRequests.clear();
+		const win = getWindow();
+		if (win && !win.isDestroyed()) win.webContents.send("pi:request-dismiss");
+	};
 	ipcMain.on("pi:respond", (_e, id: string, value: string | undefined) => {
 		const r = pendingRequests.get(id);
 		if (r) {
@@ -39,6 +48,7 @@ export function registerIpc(driver: Driver, getWindow: () => BrowserWindow | nul
 	driver.oauthBridge = {
 		openExternal: (url) => shell.openExternal(url),
 		requestInput,
+		dismissInputs,
 	};
 
 	driver.setHandlers({
