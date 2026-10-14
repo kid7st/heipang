@@ -1574,6 +1574,13 @@ export class Driver {
 						});
 						return choice ?? "";
 					}
+					// Antigravity sign-in runs a local callback server: the browser redirect
+					// is captured automatically on this machine. The "paste callback URL"
+					// prompt is only for remote/headless use, so cancel it instead of
+					// opening a confusing dialog in the middle of Google sign-in.
+					if (prompt.type === "text" && /localhost:51121|oauth-callback|paste the full callback/i.test(`${prompt.placeholder ?? ""} ${prompt.message ?? ""}`)) {
+						throw new Error("Use browser sign-in");
+					}
 					const kind = prompt.type === "manual_code" ? "code" : prompt.type === "secret" ? "secret" : "prompt";
 					const input = await bridge.requestInput(kind, {
 						message: prompt.message, placeholder: prompt.placeholder,
