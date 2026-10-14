@@ -284,7 +284,7 @@ export function SettingsModal({
 								)}
 							</div>
 						))}
-						<div className="setting-note">Claude / ChatGPT use browser sign-in. DeepSeek uses its own API key and prepaid API balance, separate from those subscriptions.</div>
+						<div className="setting-note">Claude / ChatGPT / Antigravity use browser sign-in. DeepSeek uses its own API key and prepaid API balance, separate from those subscriptions.</div>
 					</div>
 				)}
 

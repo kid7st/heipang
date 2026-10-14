@@ -45,5 +45,13 @@ assert.match(promptPayload.message, /accounts\.google\.com/);
 assert.equal(promptPayload.defaultValue, undefined);
 assert.equal(dismissed, false);
 
+// Verify remote Antigravity models discovery / fallback
+driver.settings = { getEnabledModels: () => [] };
+driver.providerApiKey = async () => undefined;
+const remoteRes = await driver.fetchRemoteAntigravityModels();
+assert.equal(remoteRes.ok, true);
+assert.ok(remoteRes.models.length > 0);
+assert.ok(remoteRes.models.some((m) => m.provider === "antigravity" && m.id.includes("flash")));
+
 await rm(root, { recursive: true, force: true });
-console.log("PASS: Antigravity OAuth shows the login URL in the dialog, keeps the paste box empty, never auto-submits or auto-closes");
+console.log("PASS: Antigravity OAuth shows the login URL in the dialog, keeps the paste box empty, never auto-submits or auto-closes; dynamic model list available");

@@ -1,6 +1,6 @@
 {
   "name": "heipang",
-  "version": "0.4.8",
+  "version": "0.4.9",
   "description": "HEIPANG — fast, model-agnostic desktop GUI for pi",
   "main": "./out/main/index.js",
   "author": "elylyly",
@@ -26,7 +26,8 @@
     "@earendil-works/pi-agent-core": "^0.99.1",
     "@earendil-works/pi-ai": "^0.99.1",
     "@earendil-works/pi-coding-agent": "^0.99.1",
-    "@earendil-works/pi-tui": "^0.99.1"
+    "@earendil-works/pi-tui": "^0.99.1",
+    "undici": "^7.28.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

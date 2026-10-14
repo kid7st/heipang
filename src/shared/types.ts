@@ -259,6 +259,7 @@ export interface PiApi {
 	removeModel(provider: string, id: string): Promise<ModelsPayload>;
 	fetchRemoteModels(): Promise<{ ok: boolean; models?: RemoteModel[]; error?: string }>;
 	fetchRemoteOpenAIModels(): Promise<{ ok: boolean; models?: RemoteModel[]; error?: string }>;
+	fetchRemoteAntigravityModels(): Promise<{ ok: boolean; models?: RemoteModel[]; error?: string }>;
 	refreshModelCatalog(): Promise<{ ok: boolean; count?: number; error?: string }>;
 	setEnabledModels(enabled: string[]): Promise<ModelsPayload>;
 	setDefaultModel(provider: string, id: string): Promise<ModelsPayload>;

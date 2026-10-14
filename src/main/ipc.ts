@@ -79,6 +79,7 @@ export function registerIpc(driver: Driver, getWindow: () => BrowserWindow | nul
 	h("pi:removeModel", (provider: string, id: string) => driver.removeModel(provider, id));
 	h("pi:fetchRemoteModels", () => driver.fetchRemoteModels());
 	h("pi:fetchRemoteOpenAIModels", () => driver.fetchRemoteOpenAIModels());
+	h("pi:fetchRemoteAntigravityModels", () => driver.fetchRemoteAntigravityModels());
 	h("pi:refreshModelCatalog", () => driver.refreshModelCatalog());
 	h("pi:setEnabledModels", (enabled: string[]) => driver.setEnabledModels(enabled));
 	h("pi:setDefaultModel", (provider: string, id: string) => driver.setDefaultModel(provider, id));

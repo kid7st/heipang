@@ -17,6 +17,12 @@ import type { AuthPrompt, Model } from "@earendil-works/pi-ai";
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai/compat";
 import { convertPdfAttachments } from "./provider-compat.js";
 import { measuredStream } from "./request-stream.js";
+import antigravityExtension, {
+	discoverAntigravityModels,
+	fetchAccountUsage,
+	getCurrentAntigravityCatalog,
+	registerAntigravityToRuntime,
+} from "./antigravity/index.js";
 import type {
 	AccountInfo,
 	ActiveState,
@@ -305,6 +311,7 @@ export class Driver {
 			cwd: homedir(),
 			agentDir: this.agentDir,
 			settingsManager: this.settings,
+			extensionFactories: [antigravityExtension],
 		});
 		this.guiSettings = this.loadGuiSettings();
 		void this.loadCatalog().catch(() => {}); // warm the latest-models cache on startup
@@ -399,12 +406,14 @@ export class Driver {
 
 	// ---------------------------------------------------------------- models
 
-	private createModelRuntime(): Promise<ModelRuntime> {
-		return ModelRuntime.create({
+	private async createModelRuntime(): Promise<ModelRuntime> {
+		const runtime = await ModelRuntime.create({
 			authPath: join(this.agentDir, "auth.json"),
 			modelsPath: join(this.agentDir, "models.json"),
 			allowModelNetwork: false, // keep startup offline-fast; catalogs are refreshed separately
 		});
+		registerAntigravityToRuntime(runtime);
+		return runtime;
 	}
 
 	/** The shared model/auth runtime. Created once, rebuilt after models.json writes. */
@@ -535,6 +544,17 @@ export class Driver {
 				// V4 Pro is text-only. Retain reasoning_content across tool turns;
 				// sending an image or dropping reasoning makes the API reject a turn.
 				if (m.id === "deepseek-v4-pro") entry.input = ["text"];
+			} else if (m.provider === "antigravity") {
+				const catalog = (await this.runtime()).getModel("antigravity", m.id);
+				entry.api = "antigravity-api";
+				entry.baseUrl = "https://daily-cloudcode-pa.googleapis.com";
+				if (catalog) {
+					entry.thinkingLevelMap = catalog.thinkingLevelMap;
+					entry.contextWindow = catalog.contextWindow;
+					entry.maxTokens = catalog.maxTokens;
+					entry.cost = catalog.cost;
+					if (catalog.input) entry.input = catalog.input;
+				}
 			} else if (m.provider === "openai-codex") {
 				entry.api = "openai-codex-responses";
 				entry.baseUrl = "https://chatgpt.com/backend-api";
@@ -801,6 +821,54 @@ export class Driver {
 				.map((m) => ({ ...m, alreadyAdded: enabled.has(`openai-codex/${m.id}`) }))
 				.sort((a, b) => verCmpDesc(openaiVer(a.id), openaiVer(b.id)) || a.id.localeCompare(b.id));
 			if (models.length === 0) return { ok: false, error: "No recent OpenAI models found (try Refresh)" };
+			return { ok: true, models };
+		} catch (err) {
+			return { ok: false, error: err instanceof Error ? err.message : String(err) };
+		}
+	}
+
+	/** Antigravity: dynamic model discovery via Cloud Code API, falling back
+	 * to the bundled catalog when offline or signed out. */
+	async fetchRemoteAntigravityModels(): Promise<{ ok: boolean; models?: RemoteModel[]; error?: string }> {
+		try {
+			const enabled = new Set(this.settings.getEnabledModels() ?? []);
+			let catalogModels: Array<{ id: string; name?: string; reasoning?: boolean; contextWindow?: number; maxTokens?: number }> = [];
+			const apiKey = await this.providerApiKey("antigravity");
+			if (apiKey) {
+				try {
+					const discovered = await discoverAntigravityModels(apiKey);
+					if (discovered.models.length > 0) {
+						catalogModels = discovered.models.map((m: any) => ({
+							id: m.id,
+							name: m.name ?? m.id,
+							reasoning: m.reasoning ?? true,
+							contextWindow: m.contextWindow ?? 1048576,
+							maxTokens: m.maxTokens ?? 65536,
+						}));
+					}
+				} catch {
+					/* fallback to static catalog on failure */
+				}
+			}
+			if (catalogModels.length === 0) {
+				const fallback = getCurrentAntigravityCatalog();
+				catalogModels = fallback.models.map((m: any) => ({
+					id: m.id,
+					name: m.name ?? m.id,
+					reasoning: "reasoning" in m ? (m as any).reasoning : true,
+					contextWindow: "contextWindow" in m ? (m as any).contextWindow : 1048576,
+					maxTokens: "maxTokens" in m ? (m as any).maxTokens : 65536,
+				}));
+			}
+			const models: RemoteModel[] = catalogModels.map((m) => ({
+				id: m.id,
+				display_name: m.name ?? m.id,
+				provider: "antigravity",
+				reasoning: m.reasoning ?? true,
+				contextWindow: m.contextWindow ?? 1048576,
+				maxTokens: m.maxTokens ?? 65536,
+				alreadyAdded: enabled.has(`antigravity/${m.id}`),
+			}));
 			return { ok: true, models };
 		} catch (err) {
 			return { ok: false, error: err instanceof Error ? err.message : String(err) };
@@ -1685,7 +1753,7 @@ export class Driver {
 		const provider = this.session?.model?.provider ?? this.settings.getDefaultProvider();
 		if (!provider) return { error: "No active provider" };
 		if (provider === "deepseek") return { provider, billing: "api" };
-		if (provider !== "anthropic" && provider !== "openai-codex") return { provider, error: "Usage not available for this provider" };
+		if (provider !== "anthropic" && provider !== "openai-codex" && provider !== "antigravity") return { provider, error: "Usage not available for this provider" };
 
 		// Serve fresh cache without touching the network (avoids 429 from frequent polling).
 		const cached = this.usageCache.get(provider);
@@ -1728,6 +1796,31 @@ export class Driver {
 					provider,
 					fiveHour: d.five_hour ? { pct: d.five_hour.utilization, resetsAt: d.five_hour.resets_at } : undefined,
 					sevenDay: d.seven_day ? { pct: d.seven_day.utilization, resetsAt: d.seven_day.resets_at } : undefined,
+				});
+			}
+			if (provider === "antigravity") {
+				const usage = await fetchAccountUsage(apiKey);
+				const allBuckets = (usage.groups ?? []).flatMap((g) => g.buckets ?? []);
+				const fiveHourBucket = allBuckets.find(
+					(b) => /5.*h/i.test(b.displayName) || /5.*h/i.test(b.bucketId) || b.window === "18000s",
+				);
+				const sevenDayBucket = allBuckets.find(
+					(b) => /week|7.*d/i.test(b.displayName) || /week|7.*d/i.test(b.bucketId) || b.window === "604800s",
+				);
+				return ok({
+					provider,
+					fiveHour: fiveHourBucket
+						? {
+								pct: Math.max(0, Math.min(100, Math.round((1 - (fiveHourBucket.remainingFraction ?? 0)) * 100))),
+								resetsAt: fiveHourBucket.resetTime ?? null,
+							}
+						: undefined,
+					sevenDay: sevenDayBucket
+						? {
+								pct: Math.max(0, Math.min(100, Math.round((1 - (sevenDayBucket.remainingFraction ?? 0)) * 100))),
+								resetsAt: sevenDayBucket.resetTime ?? null,
+							}
+						: undefined,
 				});
 			}
 			// openai-codex

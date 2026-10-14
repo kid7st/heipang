@@ -34,13 +34,9 @@ App 读写的模型、登录凭证、扩展、技能都在 **`~/.pi/agent/`**，
 - `auth.json` / `models.json` / `settings.json`
 - `extensions/`（含 read-url、read-page、force-opus-xhigh 等）
 - `skills/`
-- npm 包目录 `~/.pi/agent/npm/`（Antigravity/Gemini、DeepSeek 等第三方 provider 通过 `pi install npm:...` 装在这里）
+- npm 包目录 `~/.pi/agent/npm/`（第三方扩展与技能通过 `pi install npm:...` 装在这里）
 
-所以同事拉取仓库后，需要自己的 `~/.pi/agent` 配置才能登录模型。Antigravity（Gemini）用：
-
-```bash
-pi install npm:pi-antigravity
-```
+Antigravity（Gemini / Claude 等 Google Cloud Code 接入）已内置集成，无需外部手动安装扩展即可直接在设置中通过 Google 账号登录并使用。
 
 ## 测试
 

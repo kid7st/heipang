@@ -10,7 +10,7 @@ export function ModelManager({
 	onChanged: (next: ModelsPayload) => void;
 }) {
 	const [remote, setRemote] = useState<RemoteModel[] | null>(null);
-	const [remoteProvider, setRemoteProvider] = useState<"anthropic" | "openai-codex">("anthropic");
+	const [remoteProvider, setRemoteProvider] = useState<"anthropic" | "openai-codex" | "antigravity">("anthropic");
 	const [remoteSel, setRemoteSel] = useState<Set<string>>(new Set());
 	const [busy, setBusy] = useState(false);
 	const [err, setErr] = useState<string | null>(null);
@@ -26,10 +26,15 @@ export function ModelManager({
 	// Active = the models actually offered in the dropdown (enabled set).
 	const active = models.all.filter((m) => enabledSet.has(`${m.provider}/${m.id}`));
 
-	const fetchRemote = async (provider: "anthropic" | "openai-codex") => {
+	const fetchRemote = async (provider: "anthropic" | "openai-codex" | "antigravity") => {
 		setBusy(true);
 		setErr(null);
-		const res = provider === "openai-codex" ? await window.pi.fetchRemoteOpenAIModels() : await window.pi.fetchRemoteModels();
+		const res =
+			provider === "openai-codex"
+				? await window.pi.fetchRemoteOpenAIModels()
+				: provider === "antigravity"
+					? await window.pi.fetchRemoteAntigravityModels()
+					: await window.pi.fetchRemoteModels();
 		setBusy(false);
 		if (!res.ok) {
 			setErr(res.error || "Failed to fetch models");
@@ -75,7 +80,7 @@ export function ModelManager({
 				name: m.display_name || m.id,
 				reasoning: m.reasoning ?? true,
 				contextWindow: m.contextWindow ?? (remoteProvider === "openai-codex" ? 272000 : 1000000),
-				maxTokens: m.maxTokens ?? 128000,
+				maxTokens: m.maxTokens ?? (remoteProvider === "antigravity" ? 65536 : 128000),
 			})),
 		);
 		setBusy(false);
@@ -88,6 +93,7 @@ export function ModelManager({
 		setBusy(true);
 		const codex = mProvider === "openai-codex";
 		const deepseek = mProvider === "deepseek";
+		const antigravity = mProvider === "antigravity";
 		await addAndEnable([
 			{
 				provider: mProvider,
@@ -95,7 +101,7 @@ export function ModelManager({
 				name: mName.trim() || mId.trim(),
 				reasoning: true,
 				contextWindow: codex ? (/gpt-5\.6/i.test(mId.trim()) ? 1000000 : 272000) : 1000000,
-				maxTokens: deepseek ? 384000 : 128000,
+				maxTokens: deepseek ? 384000 : antigravity ? 65536 : 128000,
 			},
 		]);
 		setBusy(false);
@@ -147,6 +153,9 @@ export function ModelManager({
 				<button className="btn btn-sm" onClick={() => fetchRemote("openai-codex")} disabled={busy} type="button">
 					{busy ? "…" : "Fetch from OpenAI"}
 				</button>
+				<button className="btn btn-sm" onClick={() => fetchRemote("antigravity")} disabled={busy} type="button">
+					{busy ? "…" : "Fetch from Antigravity"}
+				</button>
 				<button className="btn btn-sm" onClick={refreshLatest} disabled={busy} title="Re-pull the latest-models catalog now" type="button">
 					{busy ? "…" : "Refresh latest"}
 				</button>
@@ -160,10 +169,11 @@ export function ModelManager({
 					<select value={mProvider} onChange={(e) => setMProvider(e.target.value)}>
 						<option value="anthropic">Claude (anthropic)</option>
 						<option value="openai-codex">ChatGPT (openai-codex)</option>
+						<option value="antigravity">Antigravity (antigravity)</option>
 						<option value="deepseek">DeepSeek API (deepseek)</option>
 					</select>
 					<input
-						placeholder={mProvider === "openai-codex" ? "model id (e.g. gpt-6.1-sol)" : mProvider === "deepseek" ? "deepseek-v4-pro" : "model id (e.g. claude-opus-5-5)"}
+						placeholder={mProvider === "openai-codex" ? "model id (e.g. gpt-6.1-sol)" : mProvider === "deepseek" ? "deepseek-v4-pro" : mProvider === "antigravity" ? "gemini-2.5-pro" : "model id (e.g. claude-opus-5-5)"}
 						value={mId}
 						onChange={(e) => setMId(e.target.value)}
 					/>
