@@ -18,6 +18,7 @@ import { getSupportedThinkingLevels } from "@earendil-works/pi-ai/compat";
 import { convertPdfAttachments } from "./provider-compat.js";
 import { measuredStream } from "./request-stream.js";
 import antigravityExtension, {
+	applyAntigravityCatalog,
 	discoverAntigravityModels,
 	fetchAccountUsage,
 	getCurrentAntigravityCatalog,
@@ -545,14 +546,16 @@ export class Driver {
 				// sending an image or dropping reasoning makes the API reject a turn.
 				if (m.id === "deepseek-v4-pro") entry.input = ["text"];
 			} else if (m.provider === "antigravity") {
-				const catalog = (await this.runtime()).getModel("antigravity", m.id);
+				const catalog: any =
+					(await this.runtime()).getModel("antigravity", m.id) ??
+					getCurrentAntigravityCatalog().models.find((cm) => cm.id === m.id);
 				entry.api = "antigravity-api";
 				entry.baseUrl = "https://daily-cloudcode-pa.googleapis.com";
 				if (catalog) {
-					entry.thinkingLevelMap = catalog.thinkingLevelMap;
-					entry.contextWindow = catalog.contextWindow;
-					entry.maxTokens = catalog.maxTokens;
-					entry.cost = catalog.cost;
+					if (catalog.thinkingLevelMap) entry.thinkingLevelMap = catalog.thinkingLevelMap;
+					if (catalog.contextWindow) entry.contextWindow = catalog.contextWindow;
+					if (catalog.maxTokens) entry.maxTokens = catalog.maxTokens;
+					if (catalog.cost) entry.cost = catalog.cost;
 					if (catalog.input) entry.input = catalog.input;
 				}
 			} else if (m.provider === "openai-codex") {
@@ -838,6 +841,7 @@ export class Driver {
 				try {
 					const discovered = await discoverAntigravityModels(apiKey);
 					if (discovered.models.length > 0) {
+						applyAntigravityCatalog(discovered);
 						catalogModels = discovered.models.map((m: any) => ({
 							id: m.id,
 							name: m.name ?? m.id,

@@ -134,7 +134,7 @@ function registerCompatApiProvider(): void {
   }
 }
 
-export { registerCompatApiProvider, fetchAccountUsage, discoverAntigravityModels, getCurrentAntigravityCatalog, PROVIDER_ID };
+export { applyAntigravityCatalog, registerCompatApiProvider, fetchAccountUsage, discoverAntigravityModels, getCurrentAntigravityCatalog, PROVIDER_ID };
 
 export function createAntigravityProviderConfig() {
   const initialCatalog = getCurrentAntigravityCatalog();
@@ -176,6 +176,19 @@ export function registerAntigravityToRuntime(runtime: { registerProvider: (id: s
 
 export default function antigravityExtension(pi: ExtensionAPI): void {
   registerCompatApiProvider();
+
+  // Print and RPC modes do not refresh catalogs before resolving --model. Refresh on
+  // session start so a stale 1.2.x cache is replaced before the prompt, and so the next
+  // headless process hydrates Gemini 4 from the persisted store (#93).
+  pi.on("session_start", async (_event, ctx) => {
+    if (process.env.PI_OFFLINE !== undefined) return;
+    if (typeof ctx.modelRegistry?.refresh !== "function") return;
+    try {
+      await ctx.modelRegistry.refresh({ providers: [PROVIDER_ID] });
+    } catch {
+      // Last-known-good catalog stays in place. Forced refreshes still report via the command.
+    }
+  });
 
   const providerConfig = createAntigravityProviderConfig();
 

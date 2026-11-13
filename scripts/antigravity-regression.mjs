@@ -53,5 +53,55 @@ assert.equal(remoteRes.ok, true);
 assert.ok(remoteRes.models.length > 0);
 assert.ok(remoteRes.models.some((m) => m.provider === "antigravity" && m.id.includes("flash")));
 
+// Verify Gemini 4 Argon / Carbon / Hydrogen grouping, xhigh routing, and thinking config
+const jiti = createJiti(import.meta.url, { alias: { electron: shim } });
+const {
+	ANTIGRAVITY_MODELS,
+	ANTIGRAVITY_ROUTING,
+	applyAntigravityCatalog,
+	buildAntigravityCatalog,
+	getMaxOutputTokens,
+	getThinkingConfig,
+	resetAntigravityCatalogForTests,
+} = await jiti.import(resolve("src/main/antigravity/models/index.ts"));
+
+const info = (displayName, extra = {}) => ({
+	displayName,
+	supportsThinking: true,
+	supportsImages: true,
+	...extra,
+});
+const rawModels = {
+	"gemini-4-argon-low": info("Gemini 4 Argon (Low)"),
+	"gemini-4-argon-medium": info("Gemini 4 Argon (Medium)"),
+	"gemini-4-argon-high": info("Gemini 4 Argon (High)"),
+	"gemini-4-carbon-low": info("Gemini 4 Carbon (Low)", { maxTokens: 1048576, maxOutputTokens: 262144 }),
+	"gemini-4-carbon-medium": info("Gemini 4 Carbon (Medium)", { maxTokens: 1048576, maxOutputTokens: 262144 }),
+	"gemini-4-carbon-high": info("Gemini 4 Carbon (High)", { maxTokens: 1048576, maxOutputTokens: 262144 }),
+	"gemini-4-hydrogen-low": info("Gemini 4 Hydrogen (Low)", { maxTokens: 1048576, maxOutputTokens: 262144 }),
+	"gemini-4-hydrogen-medium": info("Gemini 4 Hydrogen (Medium)", { maxTokens: 1048576, maxOutputTokens: 262144 }),
+	"gemini-4-hydrogen-high": info("Gemini 4 Hydrogen (High)", { maxTokens: 1048576, maxOutputTokens: 262144 }),
+	"gemini-4-hydrogen-xhigh": info("Gemini 4 Hydrogen (XHigh)", { maxTokens: 1048576, maxOutputTokens: 262144 }),
+};
+const sortsPayload = [{ groups: [{ modelIds: ["gemini-4-argon-low", "gemini-4-argon-medium", "gemini-4-argon-high"] }] }];
+const catalog = buildAntigravityCatalog(
+	rawModels,
+	{ models: ANTIGRAVITY_MODELS, routing: ANTIGRAVITY_ROUTING },
+	sortsPayload,
+);
+assert.deepEqual(
+	catalog.models.map((m) => m.id).sort(),
+	["gemini-4-argon", "gemini-4-carbon", "gemini-4-hydrogen"].sort(),
+);
+assert.equal(catalog.routing["gemini-4-hydrogen"].routing?.xhigh, "gemini-4-hydrogen-xhigh");
+assert.equal(catalog.models.find((m) => m.id === "gemini-4-hydrogen")?.thinkingLevelMap?.xhigh, "xhigh");
+assert.equal(catalog.models.find((m) => m.id === "gemini-4-carbon")?.maxTokens, 262144);
+assert.equal(catalog.models.find((m) => m.id === "gemini-4-hydrogen")?.maxTokens, 262144);
+applyAntigravityCatalog(catalog);
+assert.equal(getMaxOutputTokens("gemini-4-hydrogen", "gemini-4-hydrogen-xhigh"), 262144);
+assert.deepEqual(getThinkingConfig("gemini-4-hydrogen-xhigh", "xhigh"), { includeThoughts: true, thinkingBudget: -1 });
+assert.equal(getThinkingConfig("gemini-4-argon-low", "off"), undefined);
+resetAntigravityCatalogForTests();
+
 await rm(root, { recursive: true, force: true });
-console.log("PASS: Antigravity OAuth shows the login URL in the dialog, keeps the paste box empty, never auto-submits or auto-closes; dynamic model list available");
+console.log("PASS: Antigravity OAuth shows the login URL in the dialog, keeps the paste box empty, never auto-submits or auto-closes; dynamic model list and Gemini 4 routing available");
