@@ -28,7 +28,7 @@ const { resolveRelayApiKey } = await settingsJiti.import(resolve("src/main/antig
 const { antigravityTransport } = await settingsJiti.import(resolve("src/main/antigravity/client/transport.ts"));
 const { antigravityProvider } = await settingsJiti.import(resolve("src/main/antigravity/provider.ts"));
 const { streamAntigravity } = await settingsJiti.import(resolve("src/main/antigravity/stream/index.ts"));
-const { ModelRuntime } = await import("@earendil-works/pi-coding-agent");
+const { ModelRuntime, createAgentSession, SessionManager } = await import("@earendil-works/pi-coding-agent");
 const originalDispatcher = getGlobalDispatcher();
 const mock = new MockAgent();
 mock.disableNetConnect();
@@ -229,5 +229,58 @@ const skillRequest = buildRequest(promptModel, skillContext, "project-1", {}, "g
 assert.equal(skillRequest.request.systemInstruction.parts[1].text, '<skill name="docs">Inside antigravity. codemode scripts</skill>');
 assert.equal(skillRequest.request.contents[0].parts[0].text.trim(), userText);
 
-await rm(root, { recursive: true, force: true });
-console.log("PASS: Antigravity relay validation, encrypted persistence, project isolation, legacy credential override, model availability, Gemini 4 routing and system prompt normalization");
+const sessionMock = new MockAgent();
+sessionMock.disableNetConnect();
+setGlobalDispatcher(sessionMock);
+configureRelay({ url: "https://relay.example.test", key: "secret-key" });
+await runtime.setRuntimeApiKey("antigravity", "heipang-relay");
+const sessionRelay = sessionMock.get("https://relay.example.test");
+sessionRelay.intercept({ path: "/v1internal:writeTrajectoryAcls", method: "POST" }).reply(200, {}).persist();
+sessionRelay.intercept({ path: streamPath, method: "POST", body: (body) => JSON.parse(body).requestType === "checkpoint" }).reply(200, "").persist();
+const sessionRequests = [];
+sessionRelay.intercept({ path: streamPath, method: "POST", body: (body) => JSON.parse(body).requestType !== "checkpoint" }).reply(200, (request) => {
+	sessionRequests.push(JSON.parse(request.body).request);
+	return `data: ${JSON.stringify({ response: { candidates: [{ content: { parts: [{ text: "Session response" }] }, finishReason: "STOP" }] } })}\n\n`;
+}, { headers: { "content-type": "text/event-stream" } }).persist();
+const sessionSettings = SettingsManager.inMemory({ retry: { enabled: false }, cacheWarming: "off" });
+const sessionLoader = new DefaultResourceLoader({
+	cwd: root, agentDir: root, settingsManager: sessionSettings,
+	noExtensions: true, noSkills: true, noContextFiles: true,
+});
+await sessionLoader.reload();
+const { session } = await createAgentSession({
+	cwd: root, agentDir: root, modelRuntime: runtime,
+	model: runtime.getModel("antigravity", "gemini-3.8-flash"),
+	thinkingLevel: "off", tools: ["read", "bash"], settingsManager: sessionSettings,
+	resourceLoader: sessionLoader, sessionManager: SessionManager.inMemory(root),
+});
+session.setActiveToolsByName(["read"]);
+driver.agentDir = root;
+driver.installSessionGuards(session);
+try {
+	assert.match(session.systemPrompt, /inside pi,/);
+	assert.ok(session.systemPrompt.includes(docsBlurb));
+	await session.prompt(userText);
+	assert.equal(session.getLastAssistantText(), "Session response");
+	assert.equal(sessionRequests.length, 1);
+	const firstPrompt = sessionRequests[0].systemInstruction.parts.map((part) => part.text).join("\n");
+	assert.match(firstPrompt, /inside antigravity,/);
+	assert.ok(!firstPrompt.includes(docsBlurb));
+	assert.ok(firstPrompt.includes("codemode scripts (docs/codemode.md)"));
+	assert.ok(sessionRequests[0].contents.some((message) => message.parts.some((part) => part.text === userText)));
+	assert.deepEqual(sessionRequests[0].tools.flatMap((group) => group.functionDeclarations.map((tool) => tool.name)), ["read"]);
+	session.setActiveToolsByName(["read", "bash"]);
+	await session.prompt("Continue without using tools.");
+	assert.equal(session.getLastAssistantText(), "Session response");
+	assert.equal(sessionRequests.length, 2);
+	assert.deepEqual(sessionRequests[1].tools.flatMap((group) => group.functionDeclarations.map((tool) => tool.name)), ["read", "bash"]);
+	assert.match(sessionRequests[1].systemInstruction.parts[0].text, /inside antigravity,/);
+	assert.ok(!sessionRequests[1].systemInstruction.parts[0].text.includes(docsBlurb));
+	sessionMock.assertNoPendingInterceptors();
+} finally {
+	session.dispose();
+	setGlobalDispatcher(originalDispatcher);
+	await sessionMock.close();
+	await rm(root, { recursive: true, force: true });
+}
+console.log("PASS: Antigravity relay validation, encrypted persistence, project isolation, legacy credential override, model availability, Gemini 4 routing, SDK session/tool updates and system prompt normalization");

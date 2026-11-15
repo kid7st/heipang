@@ -5,7 +5,7 @@ HEIPANG 的并行版本桌面客户端（Electron + React + TypeScript），跑�
 ## 环境要求
 
 - macOS（arm64）本地构建；Windows 用 CI 打包
-- Node 22+（`/opt/homebrew/bin`），npm
+- Node.js 22.19.0 or newer, npm
 - 一份 `~/.pi/agent/` 共享配置（见下）
 
 ## 首次拉取
