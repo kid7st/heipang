@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { getSelectableModels } from "../../../shared/model-selection";
 import type { ActiveState, ModelsPayload, ThinkingLevel, UsageInfo } from "../../../shared/types";
 
 const THINKING: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
@@ -92,10 +93,7 @@ export function BottomBar({
 	onSetThinking: (level: ThinkingLevel) => void;
 	onRefreshUsage: () => void;
 }) {
-	const enabledSet = new Set(models?.enabled ?? []);
-	const candidates = [...(models?.available ?? []), ...(models?.all ?? [])
-		.filter((m) => m.provider === "deepseek" && !m.hasAuth)];
-	const pool = candidates.filter((m) => enabledSet.size > 0 ? enabledSet.has(`${m.provider}/${m.id}`) : m.hasAuth);
+	const pool = getSelectableModels(models);
 	const current = state?.model ? `${state.model.provider}/${state.model.id}` : "";
 	const model = models?.all.find((m) => `${m.provider}/${m.id}` === current);
 	const thinking = model?.thinkingLevels ?? THINKING;

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { isPresetModel } from "../../../shared/model-selection";
 import type { ModelsPayload, NewModelInput, RemoteModel } from "../../../shared/types";
 
 /** Embeddable model management (rendered inside Settings → Models). */
@@ -23,8 +24,7 @@ export function ModelManager({
 	const enabledSet = new Set(models.enabled);
 	const defKey = models.defaultProvider && models.defaultModel ? `${models.defaultProvider}/${models.defaultModel}` : "";
 
-	// Active = the models actually offered in the dropdown (enabled set).
-	const active = models.all.filter((m) => enabledSet.has(`${m.provider}/${m.id}`));
+	const active = models.all.filter((m) => isPresetModel(m) || enabledSet.has(`${m.provider}/${m.id}`));
 
 	const fetchRemote = async (provider: "anthropic" | "openai-codex" | "antigravity") => {
 		setBusy(true);
@@ -137,9 +137,13 @@ export function ModelManager({
 							<div className="model-id">{key}</div>
 							{!m.hasAuth && <span className="badge noauth">no auth</span>}
 							{m.id === "deepseek-v4-pro" && <div className="setting-note">Text-only · Separate API billing</div>}
-							<button className="btn btn-sm" onClick={() => removeActive(key)} type="button">
-								Remove
-							</button>
+							{isPresetModel(m) ? (
+								<span className="badge">Built-in</span>
+							) : (
+								<button className="btn btn-sm" onClick={() => removeActive(key)} type="button">
+									Remove
+								</button>
+							)}
 						</div>
 					);
 				})}

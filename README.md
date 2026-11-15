@@ -51,6 +51,12 @@ External copies of the `pi-antigravity` package are excluded from HEIPANG's acti
 
 The bundled source in `src/main/antigravity/` comes from pi-antigravity 0.11.0 (MIT; see its `LICENSE`), with application-specific configuration, provider availability, project-cache isolation and redirect protection.
 
+## DeepSeek built-in models
+
+DeepSeek V4.1 Flash (`deepseek-flash`) and DeepSeek V4 Pro (`deepseek-v4-pro`) are preconfigured and always appear in the conversation model selector. No model ID entry or manual model setup is required. Selecting one without credentials prompts for a DeepSeek API key; an account with access to Flash but not Pro can still connect.
+
+Settings → Models lists these entries as **Built-in**. Their capabilities, limits and reasoning options come from the bundled Pi model catalog. Other model selections and the shared enabled-model configuration are unchanged. DeepSeek API usage requires a separate API balance.
+
 ## 测试
 
 ```bash

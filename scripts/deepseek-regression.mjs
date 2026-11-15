@@ -15,7 +15,7 @@ assert.deepEqual(getSupportedThinkingLevels(model), ["off", "high", "max"]);
 let payload;
 const fakeFetch = async (_url, options) => {
 	payload = JSON.parse(options.body);
-	const event = { id: "fixture", object: "chat.completion.chunk", model: model.id,
+	const event = { id: "fixture", object: "chat.completion.chunk", model: payload.model,
 		choices: [{ index: 0, delta: { role: "assistant", content: "OK" }, finish_reason: "stop" }] };
 	return new Response(`data: ${JSON.stringify(event)}\n\ndata: [DONE]\n\n`, { headers: { "content-type": "text/event-stream" } });
 };
@@ -24,6 +24,20 @@ for (const level of [undefined, "high", "max"]) {
 		{ apiKey: "fixture-key", fetch: fakeFetch, reasoning: level, maxTokens: 16 });
 	assert.equal(result.stopReason, "stop");
 	assert.equal(payload.model, "deepseek-v4-pro");
+	assert.equal(payload.thinking.type, level ? "enabled" : "disabled");
+	if (level) assert.equal(payload.reasoning_effort, level);
+}
+const flash = runtime.getModel("deepseek", "deepseek-flash");
+assert.ok(flash);
+assert.equal(flash.contextWindow, 1_000_000);
+assert.equal(flash.maxTokens, 384_000);
+assert.deepEqual(flash.input, ["text", "image"]);
+assert.deepEqual(getSupportedThinkingLevels(flash), ["off", "low", "high", "max"]);
+for (const level of [undefined, "low", "high", "max"]) {
+	const result = await runtime.completeSimple(flash, { messages: [{ role: "user", content: "Test", timestamp: 0 }] },
+		{ apiKey: "fixture-key", fetch: fakeFetch, reasoning: level, maxTokens: 16 });
+	assert.equal(result.stopReason, "stop");
+	assert.equal(payload.model, "deepseek-flash");
 	assert.equal(payload.thinking.type, level ? "enabled" : "disabled");
 	if (level) assert.equal(payload.reasoning_effort, level);
 }
@@ -42,12 +56,36 @@ assert.equal(payload.messages.find((message) => message.role === "tool").tool_ca
 const root = await mkdtemp(join(tmpdir(), "heipang-deepseek-test-"));
 const shim = join(root, "electron.mjs");
 await writeFile(shim, "export const nativeImage = {};\n");
-const { Driver } = await createJiti(import.meta.url, { alias: { electron: shim } }).import(resolve("src/main/driver.ts"));
+const jiti = createJiti(import.meta.url, { alias: { electron: shim } });
+const { Driver } = await jiti.import(resolve("src/main/driver.ts"));
+const { getSelectableModels, isPresetModel } = await jiti.import(resolve("src/shared/model-selection.ts"));
+const defaults = [flash, model].map((entry) => ({ ...entry, hasAuth: false }));
+const other = { ...defaults[0], provider: "anthropic", id: "example", name: "Example", hasAuth: true };
+const custom = { ...defaults[0], id: "custom-deepseek" };
+assert.deepEqual(getSelectableModels(null), []);
+for (const authenticated of [false, true]) {
+	const deepseek = defaults.map((entry) => ({ ...entry, hasAuth: authenticated }));
+	const all = [...deepseek, other, custom];
+	for (const enabled of [[], ["deepseek/deepseek-v4-pro"], ["anthropic/example"]]) {
+		const payload = { all, available: all.filter((entry) => entry.hasAuth), enabled };
+		const snapshot = JSON.stringify(payload);
+		const choices = getSelectableModels(payload);
+		for (const entry of deepseek) {
+			assert.equal(choices.filter((choice) => choice.provider === entry.provider && choice.id === entry.id).length, 1);
+			assert.equal(isPresetModel(entry), true);
+		}
+		assert.equal(choices.some((choice) => choice.id === "custom-deepseek"), false);
+		assert.equal(choices.some((choice) => choice.provider === "anthropic"), enabled.length === 0 || enabled.includes("anthropic/example"));
+		assert.equal(JSON.stringify(payload), snapshot);
+	}
+}
+assert.equal(isPresetModel({ ...defaults[0], provider: "antigravity" }), false);
 const driver = Object.create(Driver.prototype);
 let persisted = false;
 let secretKind;
 driver.oauthBridge = { requestInput: async (kind) => { secretKind = kind; return "fixture-key"; }, dismissInputs: () => {}, openExternal: () => {} };
 driver.runtime = async () => ({
+	getModels: (provider) => runtime.getModels(provider),
 	login: async (_id, type, interaction) => {
 		assert.equal(type, "api_key");
 		await interaction.prompt({ type: "secret", message: "Enter key" });
@@ -61,6 +99,18 @@ try {
 	assert.equal(secretKind, "secret");
 	assert.equal(persisted, true);
 	persisted = false;
+	globalThis.fetch = async () => new Response('{"data":[{"id":"deepseek-flash"}]}', { headers: { "content-type": "application/json" } });
+	assert.equal((await driver.loginAccount("deepseek")).ok, true);
+	assert.equal(persisted, true);
+	for (const catalog of [{ data: [] }, { data: [null, { id: "unknown-model" }] }, { data: {} }]) {
+		persisted = false;
+		globalThis.fetch = async () => new Response(JSON.stringify(catalog), { headers: { "content-type": "application/json" } });
+		const result = await driver.loginAccount("deepseek");
+		assert.equal(result.ok, false);
+		assert.match(result.error, /No supported DeepSeek models/);
+		assert.equal(persisted, false);
+	}
+	persisted = false;
 	globalThis.fetch = async () => new Response("Denied", { status: 401 });
 	const rejected = await driver.loginAccount("deepseek");
 	assert.equal(rejected.ok, false);
@@ -68,4 +118,4 @@ try {
 	assert.equal(rejected.error.includes("fixture-key"), false);
 	assert.match(rejected.error, /401/);
 } finally { globalThis.fetch = originalFetch; await rm(root, { recursive: true, force: true }); }
-console.log("PASS: DeepSeek modes, tool reasoning round-trip, secure API-key validation, no key leakage");
+console.log("PASS: default DeepSeek model selection, Flash/Pro modes, tool reasoning round-trip, Flash-only API keys, secure API-key validation, no key leakage");

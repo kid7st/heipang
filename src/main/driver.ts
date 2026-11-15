@@ -1748,8 +1748,9 @@ export class Driver {
 						});
 						if (!response.ok) throw new Error(`DeepSeek API key verification failed (HTTP ${response.status})`);
 						const catalog: any = await response.json();
-						if (!catalog.data?.some((model: any) => model.id === "deepseek-v4-pro")) {
-							throw new Error("DeepSeek V4 Pro is not available for this API key");
+						const supported = new Set(runtime.getModels("deepseek").map((model) => model.id));
+						if (!Array.isArray(catalog.data) || !catalog.data.some((model: any) => supported.has(model?.id))) {
+							throw new Error("No supported DeepSeek models are available for this API key");
 						}
 					}
 					return value;
