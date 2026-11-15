@@ -176,7 +176,17 @@ export interface AccountInfo {
 	id: string;
 	name: string;
 	connected: boolean;
-	authType?: "oauth" | "api_key";
+	authType?: "oauth" | "api_key" | "relay";
+}
+
+export interface AntigravitySettings {
+	relayUrl: string;
+	hasKey: boolean;
+}
+
+export interface AntigravitySettingsInput {
+	relayUrl: string;
+	relayKey: string;
 }
 
 export interface WorkspaceInfo {
@@ -290,6 +300,8 @@ export interface PiApi {
 	getCommands(): Promise<CommandInfo[]>;
 	listWorkspaces(): Promise<WorkspaceInfo[]>;
 	getAccounts(): Promise<AccountInfo[]>;
+	getAntigravitySettings(): Promise<AntigravitySettings>;
+	saveAntigravitySettings(input: AntigravitySettingsInput): Promise<{ ok: boolean; error?: string; warning?: string }>;
 	loginAccount(id: string): Promise<{ ok: boolean; error?: string }>;
 	logoutAccount(id: string): Promise<void>;
 	getUsage(force?: boolean): Promise<UsageInfo>;

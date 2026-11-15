@@ -1,16 +1,16 @@
-import { randomUUID } from "node:crypto";
+import { antigravityTransport } from "../client/transport.js";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
+  antigravityEndpoint,
   antigravityHeaders,
-  endpointCandidates,
   jsonOrTextError,
   parseApiKey,
 } from "../client/client.js";
 import { AntigravityRequestType, AntigravityUserAgent, GeminiRole } from "../types/enums.js";
-import { antigravityFetch } from "../utils/http.js";
 import { safeError } from "../utils/security.js";
 import { sanitizeText } from "../utils/util.js";
+import { describeAntigravityFailure, imageGenRequestId } from "../wire/index.js";
 
 export const DEFAULT_IMAGE_MODEL = "gemini-3.1-flash-image";
 export const IMAGE_ASPECT_RATIOS = [
@@ -197,7 +197,7 @@ export function buildImageGenerateRequest(
     },
     requestType: AntigravityRequestType.ImageGen,
     userAgent: AntigravityUserAgent.Antigravity,
-    requestId: `image_gen/${Date.now()}/${randomUUID()}/1`,
+    requestId: imageGenRequestId(),
   };
 }
 
@@ -263,7 +263,7 @@ export async function collectImagesFromSse(
 export async function requestImageResponse(
   endpoint: string,
   init: RequestInit,
-  fetcher: (url: string, init: RequestInit) => Promise<Response> = antigravityFetch,
+  fetcher: (url: string, init: RequestInit) => Promise<Response> = antigravityTransport.fetch,
 ): Promise<{ response: Response; streaming: boolean }> {
   const response = await fetcher(`${endpoint}/v1internal:generateContent`, init);
   if (response.status !== 404) return { response, streaming: false };
@@ -311,42 +311,52 @@ export async function generateAntigravityImageContent(
   const headers = antigravityHeaders(creds.token);
 
   let lastError = "no endpoint available";
+  const endpoint = antigravityEndpoint();
   for (const model of models) {
+    if (options.signal?.aborted) throw new Error("Request was aborted");
     const body = JSON.stringify(
       buildImageGenerateRequest(prompt, model, creds.projectId, aspectRatio, options.inputImages),
     );
-    for (const endpoint of endpointCandidates()) {
-      if (options.signal?.aborted) throw new Error("Request was aborted");
-      try {
-        const { response, streaming } = await requestImageResponse(endpoint, {
-          method: "POST",
-          headers,
-          body,
-          signal: options.signal,
-        });
-        if (!response.ok) {
-          lastError = jsonOrTextError(await response.text()).slice(0, 400);
-          if (response.status === 404 || [403, 429, 500, 502, 503, 504].includes(response.status)) {
-            continue;
-          }
-          throw new Error(
-            `Antigravity image request failed (${response.status}): ${safeError(lastError)}`,
-          );
-        }
-        const parsed = streaming
-          ? await collectImagesFromSse(response, options.signal)
-          : parseImageResponse((await response.json()) as ImageStreamChunk);
-        if (!parsed.images.length) {
-          lastError = parsed.text.join(" ").trim() || "No image data returned.";
-          continue;
-        }
-        return { images: parsed.images, text: parsed.text, model };
-      } catch (error) {
-        lastError = safeError(error);
-        if (options.signal?.aborted) {
-          throw new Error("Request was aborted", { cause: error });
-        }
+    let response: Response;
+    let streaming: boolean;
+    try {
+      ({ response, streaming } = await requestImageResponse(endpoint, {
+        method: "POST",
+        headers,
+        body,
+        signal: options.signal,
+      }));
+    } catch (error) {
+      if (options.signal?.aborted) {
+        throw new Error("Request was aborted", { cause: error });
       }
+      lastError = safeError(error);
+      continue;
+    }
+    if (!response.ok) {
+      const body = await response.text();
+      // 404 and 429 can be model-specific; 403 is the account or project, so the next
+      // model in the chain cannot succeed.
+      if (response.status === 404 || [429, 500, 502, 503, 504].includes(response.status)) {
+        lastError = jsonOrTextError(body).slice(0, 400);
+        continue;
+      }
+      throw new Error(describeAntigravityFailure(response.status, body));
+    }
+    try {
+      const parsed = streaming
+        ? await collectImagesFromSse(response, options.signal)
+        : parseImageResponse((await response.json()) as ImageStreamChunk);
+      if (!parsed.images.length) {
+        lastError = parsed.text.join(" ").trim() || "No image data returned.";
+        continue;
+      }
+      return { images: parsed.images, text: parsed.text, model };
+    } catch (error) {
+      if (options.signal?.aborted) {
+        throw new Error("Request was aborted", { cause: error });
+      }
+      lastError = safeError(error);
     }
   }
   throw new Error(`Antigravity image generation failed: ${safeError(lastError)}`);

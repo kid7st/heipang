@@ -1,24 +1,6 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import {
-  ANTIGRAVITY_IMAGE_API,
-  ANTIGRAVITY_IMAGE_MODELS,
-  generateAntigravityImages,
-} from "./image/native.js";
-
-// Namespace import: Oh My Pi rewrites this specifier onto bundled pi-ai, which
-// does not export registerApiProvider. A static named import fails plugin load.
-import * as piAiCompat from "@earendil-works/pi-ai/compat";
-import {
-  activateAccount,
-  getApiKey,
-  listAccounts,
-  loginAntigravity,
-  rememberAccount,
-  refreshAntigravityToken,
-  removeAccount,
-  updateRememberedAccount,
-} from "./auth/index.js";
-import { DEFAULT_ENDPOINT } from "./client/index.js";
+import { RELAY_AUTH_SOURCE, resolveRelayApiKey } from "./auth/index.js";
+import { relayUrl } from "./client/relay.js";
 import { getLastDiagnostics, runWithDiagnostics } from "./diagnostics/index.js";
 import { generateAntigravityImage, parseImageCommandArgs } from "./image/index.js";
 import { executeAntigravitySearch, parseSearchCommandArgs } from "./search/index.js";
@@ -27,18 +9,12 @@ import {
   discoverAntigravityModels,
   getCurrentAntigravityCatalog,
   PROVIDER_ID,
-  PROVIDER_NAME,
-  refreshAntigravityModels,
   resolvedCatalog,
 } from "./models/index.js";
-import { ANTIGRAVITY_API, streamAntigravity } from "./stream/index.js";
-import {
-  fetchAccountUsage,
-  formatModelsList,
-  formatUsageSummary,
-  resolveApiKeyFromContext,
-} from "./usage/index.js";
-import { redactSecrets, maskEmail } from "./utils/index.js";
+import { antigravityProvider } from "./provider.js";
+import { bindSessionStream } from "./wire/persistence.js";
+import { fetchAccountUsage, formatModelsList, formatUsageSummary } from "./usage/index.js";
+import { redactSecrets, safeError } from "./utils/index.js";
 
 /**
  * Pi's interactive `notify` writes into the chat transcript. `console.log` in that
@@ -57,131 +33,34 @@ function emitCommandOutput(
   else console.log(text);
 }
 
-async function loginAndRemember(
-  callbacks: Parameters<typeof loginAntigravity>[0],
-): ReturnType<typeof loginAntigravity> {
-  const credentials = await loginAntigravity(callbacks);
-  rememberAccount(credentials);
-  return credentials;
-}
-
-async function refreshAndRemember(
-  credentials: Parameters<typeof refreshAntigravityToken>[0],
-): ReturnType<typeof refreshAntigravityToken> {
-  const refreshed = await refreshAntigravityToken(credentials);
-  updateRememberedAccount(credentials, refreshed);
-  return refreshed;
-}
-
-async function withUsage(
-  ctx: ExtensionCommandContext,
-  fn: (usage: Awaited<ReturnType<typeof fetchAccountUsage>>) => string,
-): Promise<void> {
-  try {
-    const apiKey = await resolveApiKeyFromContext(ctx);
-    if (!apiKey) {
-      emitCommandOutput(
-        ctx,
-        "No Antigravity credentials. Run /login antigravity first.",
-        "warning",
-      );
-      return;
-    }
-    if (ctx.hasUI) ctx.ui.notify("Fetching Antigravity usage…", "info");
-    const usage = await runWithDiagnostics(() => fetchAccountUsage(apiKey));
-    emitCommandOutput(ctx, fn(usage));
-  } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    emitCommandOutput(ctx, `Antigravity usage failed: ${msg}`, "warning");
-  }
-}
-
-type CompatApiProviderRegistrar = (provider: {
-  api: typeof ANTIGRAVITY_API;
-  stream: typeof streamAntigravity;
-  streamSimple: typeof streamAntigravity;
-}) => void;
-
-type CompatImagesProviderRegistrar = (provider: {
-  api: typeof ANTIGRAVITY_IMAGE_API;
-  generateImages: typeof generateAntigravityImages;
-}) => void;
-
 /**
- * Pi dispatches custom APIs through the compat registry. Oh My Pi does not
- * export `registerApiProvider` and registers the stream inside `registerProvider`.
+ * Every credential-backed command shares this shape: the work announces itself,
+ * and a failure, including a missing relay address or key, is reported once with its label.
  */
-function registerCompatApiProvider(): void {
-  const register = (piAiCompat as { registerApiProvider?: CompatApiProviderRegistrar })
-    .registerApiProvider;
-  if (typeof register === "function") {
-    register({
-      api: ANTIGRAVITY_API,
-      stream: streamAntigravity,
-      streamSimple: streamAntigravity,
-    });
-  }
-  const registerImages = (
-    piAiCompat as unknown as {
-      registerImagesApiProvider?: CompatImagesProviderRegistrar;
-    }
-  ).registerImagesApiProvider;
-  if (typeof registerImages === "function") {
-    registerImages({
-      api: ANTIGRAVITY_IMAGE_API,
-      generateImages: generateAntigravityImages,
-    });
+async function withCredentials(
+  ctx: ExtensionCommandContext,
+  label: string,
+  progress: string,
+  work: (apiKey: string) => Promise<string>,
+): Promise<void> {
+  if (ctx.hasUI) ctx.ui.notify(progress, "info");
+  try {
+    emitCommandOutput(ctx, await work(await resolveRelayApiKey()));
+  } catch (error) {
+    emitCommandOutput(ctx, `${label} failed: ${safeError(error)}`, "error");
   }
 }
 
-export { applyAntigravityCatalog, registerCompatApiProvider, fetchAccountUsage, discoverAntigravityModels, getCurrentAntigravityCatalog, PROVIDER_ID };
+export { applyAntigravityCatalog, discoverAntigravityModels, getCurrentAntigravityCatalog, fetchAccountUsage };
 
-export function createAntigravityProviderConfig() {
-  const initialCatalog = getCurrentAntigravityCatalog();
-
-  return {
-    name: PROVIDER_NAME,
-    baseUrl: DEFAULT_ENDPOINT,
-    api: ANTIGRAVITY_API,
-    models: [...initialCatalog.models, ...ANTIGRAVITY_IMAGE_MODELS],
-    refreshModels: async (context: Parameters<typeof refreshAntigravityModels>[0]) => {
-      const refreshed = await refreshAntigravityModels(context);
-      return [...refreshed, ...ANTIGRAVITY_IMAGE_MODELS];
-    },
-    oauth: {
-      name: PROVIDER_NAME,
-      // Antigravity access is quota-backed by the Google account, not metered per token.
-      // Pi uses this for the footer's (sub) marker and subscription-aware cost display.
-      isSubscription: true,
-      login: loginAndRemember,
-      refreshToken: refreshAndRemember,
-      getApiKey,
-    },
-    streamSimple: streamAntigravity,
-    images: {
-      [ANTIGRAVITY_IMAGE_API]: {
-        generateImages: generateAntigravityImages,
-      },
-    },
-  };
-}
-
-export function registerAntigravityToRuntime(runtime: { registerProvider: (id: string, config: any) => void }): void {
-  registerCompatApiProvider();
-  runtime.registerProvider(
-    PROVIDER_ID,
-    createAntigravityProviderConfig() as any,
-  );
-}
-
-export default function antigravityExtension(pi: ExtensionAPI): void {
-  registerCompatApiProvider();
+export default function (pi: ExtensionAPI): void {
+  const stream = bindSessionStream(pi);
 
   // Print and RPC modes do not refresh catalogs before resolving --model. Refresh on
   // session start so a stale 1.2.x cache is replaced before the prompt, and so the next
   // headless process hydrates Gemini 4 from the persisted store (#93).
   pi.on("session_start", async (_event, ctx) => {
-    if (process.env.PI_OFFLINE !== undefined) return;
+    // Pi's registry already skips the network in offline mode.
     if (typeof ctx.modelRegistry?.refresh !== "function") return;
     try {
       await ctx.modelRegistry.refresh({ providers: [PROVIDER_ID] });
@@ -190,18 +69,18 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
     }
   });
 
-  const providerConfig = createAntigravityProviderConfig();
-
-  // Pi 0.86 types are chat-only; newer Pi accepts mixed-operation models and images.
-  pi.registerProvider(
-    PROVIDER_ID,
-    providerConfig as unknown as Parameters<typeof pi.registerProvider>[1],
-  );
+  pi.registerProvider(antigravityProvider(stream));
 
   pi.registerCommand("antigravity.usage", {
     description: "Show Antigravity shared quota pools (Gemini / Claude+GPT, 5h + weekly)",
     handler: async (_args, ctx) => {
-      await withUsage(ctx, formatUsageSummary);
+      await withCredentials(
+        ctx,
+        "Antigravity usage",
+        "Fetching Antigravity usage…",
+        async (apiKey) =>
+          formatUsageSummary(await runWithDiagnostics(() => fetchAccountUsage(apiKey))),
+      );
     },
   });
 
@@ -209,99 +88,48 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
     description: "List Antigravity runtime models + remaining pool fraction",
     handler: async (args, ctx) => {
       const all = /\ball\b/i.test(args || "");
-      await withUsage(ctx, (usage) => formatModelsList(usage, { all }));
-    },
-  });
-
-  pi.registerCommand("antigravity.accounts", {
-    description: "List, switch, or remove linked Antigravity Google accounts",
-    handler: async (args, ctx) => {
-      const command = args.trim();
-      try {
-        if (command.startsWith("switch ")) {
-          const account = await activateAccount(command.slice("switch ".length));
-          emitCommandOutput(
-            ctx,
-            `Active Antigravity account: ${account.email || account.accountId}`,
-          );
-          return;
-        }
-        if (command.startsWith("remove ")) {
-          const remaining = await removeAccount(command.slice("remove ".length));
-          const next = remaining
-            ? ` Active account is now ${remaining.email || remaining.accountId}.`
-            : "";
-          emitCommandOutput(ctx, `Antigravity account removed.${next}`);
-          return;
-        }
-        const accounts = listAccounts();
-        if (accounts.length === 0) {
-          emitCommandOutput(
-            ctx,
-            "No linked Antigravity accounts. Run /login antigravity to add one.",
-            "warning",
-          );
-          return;
-        }
-        const lines = accounts.map(
-          (account, index) =>
-            `${account.active ? "* " : "  "}${index + 1}. ${account.email || account.accountId}`,
-        );
-        emitCommandOutput(
-          ctx,
-          `${lines.join("\n")}\nUse /antigravity.accounts switch <index|email> or /antigravity.accounts remove <index|email>.`,
-        );
-      } catch (error) {
-        const msg = error instanceof Error ? error.message : String(error);
-        emitCommandOutput(ctx, msg, "error");
-      }
+      await withCredentials(
+        ctx,
+        "Antigravity models",
+        "Fetching Antigravity usage…",
+        async (apiKey) =>
+          formatModelsList(await runWithDiagnostics(() => fetchAccountUsage(apiKey)), { all }),
+      );
     },
   });
 
   pi.registerCommand("antigravity.refresh", {
     description: "Force refresh Antigravity dynamic model catalog",
     handler: async (_args, ctx) => {
-      const apiKey = await resolveApiKeyFromContext(ctx);
-      if (!apiKey) {
-        emitCommandOutput(
-          ctx,
-          "No Antigravity credentials. Run /login antigravity first.",
-          "warning",
-        );
-        return;
-      }
-      if (ctx.hasUI) ctx.ui.notify("Refreshing Antigravity models…", "info");
-      try {
-        if (typeof ctx.modelRegistry?.refresh === "function") {
-          const result = await ctx.modelRegistry.refresh({
-            force: true,
-            providers: [PROVIDER_ID],
-          });
-          if (result?.errors?.has(PROVIDER_ID)) {
-            throw result.errors.get(PROVIDER_ID)!;
+      await withCredentials(
+        ctx,
+        "Antigravity model refresh",
+        "Refreshing Antigravity models…",
+        async (apiKey) => {
+          if (typeof ctx.modelRegistry?.refresh === "function") {
+            const result = await ctx.modelRegistry.refresh({
+              force: true,
+              providers: [PROVIDER_ID],
+            });
+            if (result?.errors?.has(PROVIDER_ID)) {
+              throw result.errors.get(PROVIDER_ID)!;
+            }
+          } else {
+            const discovered = await discoverAntigravityModels(apiKey);
+            const next = resolvedCatalog(discovered, getCurrentAntigravityCatalog());
+            if (discovered.models.length > 0) {
+              applyAntigravityCatalog(next);
+            }
           }
-        } else {
-          const discovered = await discoverAntigravityModels(apiKey);
-          const next = resolvedCatalog(discovered, getCurrentAntigravityCatalog());
-          if (discovered.models.length > 0) {
-            applyAntigravityCatalog(next);
-          }
-        }
-        const catalog = getCurrentAntigravityCatalog();
-        const count = catalog.models.length;
-        const sample = catalog.models
-          .slice(0, 4)
-          .map((m) => m.name || m.id)
-          .join(", ");
-        emitCommandOutput(
-          ctx,
-          `Antigravity models refreshed (${count} available: ${sample}${count > 4 ? ", …" : ""})`,
-          "info",
-        );
-      } catch (error) {
-        const msg = error instanceof Error ? error.message : String(error);
-        emitCommandOutput(ctx, `Antigravity model refresh failed: ${redactSecrets(msg)}`, "error");
-      }
+          const catalog = getCurrentAntigravityCatalog();
+          const count = catalog.models.length;
+          const sample = catalog.models
+            .slice(0, 4)
+            .map((m) => m.name || m.id)
+            .join(", ");
+          return `Antigravity models refreshed (${count} available: ${sample}${count > 4 ? ", …" : ""})`;
+        },
+      );
     },
   });
 
@@ -309,12 +137,15 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
     description: "Show sanitized Antigravity provider diagnostics",
     handler: async (_args, ctx) => {
       const d = getLastDiagnostics();
-      const accounts = listAccounts();
-      const active = accounts.find((account) => account.active);
-      const activeLabel = active
-        ? maskEmail(active.email) ||
-          (active.accountId.includes("@") ? maskEmail(active.accountId) : active.accountId)
-        : "none";
+      let relay = "not configured";
+      let relayStatus: string;
+      try {
+        relay = relayUrl();
+        await resolveRelayApiKey();
+        relayStatus = "ok";
+      } catch (error) {
+        relayStatus = safeError(error);
+      }
       const lines = [
         `provider=${PROVIDER_ID}`,
         `lastResolvedRuntimeModel=${d.resolvedRuntimeModel || "none"}`,
@@ -323,14 +154,13 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
         `lastEndpoint=${d.endpoint || "none"}`,
         `lastStatus=${d.status ?? "none"}`,
         `lastProjectId=${d.projectId || "none"}`,
-        `linkedAccounts=${accounts.length || "none"}`,
-        `activeAccount=${activeLabel || "none"}`,
+        `credentialSource=${RELAY_AUTH_SOURCE}`,
+        `relay=${relay}`,
+        `relayStatus=${relayStatus}`,
         ...(d.latencyMs !== undefined ? [`lastLatencyMs=${d.latencyMs}`] : []),
         `toolSchemaWarnings=${d.toolSchemaWarnings || "none"}`,
         `lastError=${d.error ? redactSecrets(d.error) : "none"}`,
-        "transport=native-streamSimple",
-        "runtimeCli=not-used",
-        "commands=/antigravity.usage /antigravity.models /antigravity.accounts /antigravity.refresh /antigravity.doctor /antigravity.image /antigravity.search",
+        "commands=/antigravity.usage /antigravity.models /antigravity.refresh /antigravity.doctor /antigravity.image /antigravity.search",
       ];
       emitCommandOutput(ctx, `Antigravity doctor\n${lines.join("\n")}`);
     },
@@ -349,68 +179,41 @@ export default function antigravityExtension(pi: ExtensionAPI): void {
         );
         return;
       }
-      try {
-        const apiKey = await resolveApiKeyFromContext(ctx);
-        if (!apiKey) {
-          emitCommandOutput(
-            ctx,
-            "No Antigravity credentials. Run /login antigravity first.",
-            "warning",
-          );
-          return;
-        }
-        if (ctx.hasUI) ctx.ui.notify("Generating Antigravity image…", "info");
-        const result = await generateAntigravityImage({
-          apiKey,
-          cwd: ctx.cwd,
-          prompt: parsed.prompt,
-          aspectRatio: parsed.aspectRatio,
-          model: parsed.model,
-          path: parsed.path,
-        });
-        emitCommandOutput(ctx, `Saved image to ${result.savedPaths.join(", ")}`);
-      } catch (error) {
-        const msg = error instanceof Error ? error.message : String(error);
-        emitCommandOutput(ctx, `Antigravity image failed: ${redactSecrets(msg)}`, "warning");
-      }
+      await withCredentials(
+        ctx,
+        "Antigravity image",
+        "Generating Antigravity image…",
+        async (apiKey) => {
+          const result = await generateAntigravityImage({
+            apiKey,
+            cwd: ctx.cwd,
+            prompt: parsed.prompt,
+            aspectRatio: parsed.aspectRatio,
+            model: parsed.model,
+            path: parsed.path,
+          });
+          return `Saved image to ${result.savedPaths.join(", ")}`;
+        },
+      );
     },
   });
 
   pi.registerCommand("antigravity.search", {
     description:
-      "Search the web via Antigravity Grounding (usage: /antigravity.search [--thinking] [--url <url>] <query>)",
+      "Search the web via Antigravity Grounding (usage: /antigravity.search [--domain <host>] <query>)",
     handler: async (args, ctx) => {
       const parsed = parseSearchCommandArgs(args || "");
       if (!parsed.query) {
-        emitCommandOutput(
-          ctx,
-          "Usage: /antigravity.search [--thinking] [--url <url>] <query>",
-          "warning",
-        );
+        emitCommandOutput(ctx, "Usage: /antigravity.search [--domain <host>] <query>", "warning");
         return;
       }
-      try {
-        const apiKey = await resolveApiKeyFromContext(ctx);
-        if (!apiKey) {
-          emitCommandOutput(
-            ctx,
-            "No Antigravity credentials. Run /login antigravity first.",
-            "warning",
-          );
-          return;
-        }
-        if (ctx.hasUI) ctx.ui.notify("Searching Google via Antigravity Grounding…", "info");
-        const result = await executeAntigravitySearch({
-          apiKey,
-          query: parsed.query,
-          urls: parsed.urls,
-          thinking: parsed.thinking,
-        });
-        emitCommandOutput(ctx, result);
-      } catch (error) {
-        const msg = error instanceof Error ? error.message : String(error);
-        emitCommandOutput(ctx, `Antigravity search failed: ${redactSecrets(msg)}`, "warning");
-      }
+      await withCredentials(
+        ctx,
+        "Antigravity search",
+        "Searching Google via Antigravity Grounding…",
+        (apiKey) =>
+          executeAntigravitySearch({ apiKey, query: parsed.query, domain: parsed.domain }),
+      );
     },
   });
 }

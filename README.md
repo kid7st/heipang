@@ -36,14 +36,27 @@ App 读写的模型、登录凭证、扩展、技能都在 **`~/.pi/agent/`**，
 - `skills/`
 - npm 包目录 `~/.pi/agent/npm/`（第三方扩展与技能通过 `pi install npm:...` 装在这里）
 
-Antigravity（Gemini / Claude 等 Google Cloud Code 接入）已内置集成，无需外部手动安装扩展即可直接在设置中通过 Google 账号登录并使用。
+## Antigravity relay connection
+
+Antigravity is bundled in the application. No separate `pi install` or local plugin checkout is required.
+
+1. Deploy and sign in to a pi-antigravity relay. Google authentication and token renewal happen on the relay, not in HEIPANG.
+2. Open **Settings → Accounts → Antigravity**.
+3. Enter **Relay URL** (`ANTIGRAVITY_RELAY_URL`) and **Relay key** (`ANTIGRAVITY_RELAY_KEY`), then click **Save and connect**.
+4. After verification, choose an Antigravity model in the conversation's model selector. The app loads the account's advertised catalog and adds its models to an existing enabled-model list. If catalog discovery fails, the last-known catalog remains available and the account card shows a warning.
+
+The URL must be an HTTPS origin without credentials, paths, query parameters or fragments. HTTP is accepted only for localhost testing. The key is encrypted using Electron's OS-backed `safeStorage` and stored in `~/.pi/agent/heipang-antigravity.json` with owner-only permissions. Saving is rejected when secure storage is unavailable. Leave the key field blank to retain a saved key; **Disconnect** removes the saved connection. HEIPANG uses these application settings rather than shell relay environment variables.
+
+External copies of the `pi-antigravity` package are excluded from HEIPANG's active extensions to avoid duplicate providers, commands and tools. They remain installed for CLI use. Existing `auth.json` OAuth credentials are left untouched; HEIPANG overrides them only in memory while its relay connection is configured.
+
+The bundled source in `src/main/antigravity/` comes from pi-antigravity 0.11.0 (MIT; see its `LICENSE`), with application-specific configuration, provider availability, project-cache isolation and redirect protection.
 
 ## 测试
 
 ```bash
 npm run test:performance   # 流式解码、PDF 转换、会话索引、IPC 补丁等
 npm run test:deepseek      # DeepSeek 接入
-npm run test:antigravity   # Antigravity OAuth 接线
+npm run test:antigravity   # Antigravity relay settings, credentials, models and routing
 ```
 
 ## 发版

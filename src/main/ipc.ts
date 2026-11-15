@@ -2,7 +2,7 @@ import { app, dialog, ipcMain, Notification, shell, type BrowserWindow } from "e
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Driver } from "./driver.js";
-import type { StreamEvent, Task } from "../shared/types.js";
+import type { AntigravitySettingsInput, StreamEvent, Task } from "../shared/types.js";
 import { checkForUpdate, downloadAndInstall } from "./updater.js";
 
 /**
@@ -103,6 +103,8 @@ export function registerIpc(driver: Driver, getWindow: () => BrowserWindow | nul
 	h("pi:getCommands", () => driver.getCommands());
 	h("pi:listWorkspaces", () => driver.listWorkspaces());
 	h("pi:getAccounts", () => driver.getAccounts());
+	h("pi:getAntigravitySettings", () => driver.getAntigravitySettings());
+	h("pi:saveAntigravitySettings", (input: AntigravitySettingsInput) => driver.saveAntigravitySettings(input));
 	h("pi:loginAccount", (id: string) => driver.loginAccount(id));
 	h("pi:logoutAccount", (id: string) => driver.logoutAccount(id));
 	h("pi:getUsage", (force?: boolean) => driver.getUsage(force));

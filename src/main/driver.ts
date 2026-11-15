@@ -22,10 +22,17 @@ import antigravityExtension, {
 	discoverAntigravityModels,
 	fetchAccountUsage,
 	getCurrentAntigravityCatalog,
-	registerAntigravityToRuntime,
 } from "./antigravity/index.js";
+import { antigravityProvider } from "./antigravity/provider.js";
+import { streamAntigravity } from "./antigravity/stream/index.js";
+import antigravitySearch from "./antigravity/features/google-search.js";
+import antigravityImage from "./antigravity/features/generate-image.js";
+import { hasRelayConfiguration } from "./antigravity/client/relay.js";
+import { AntigravitySettingsStore } from "./antigravity-settings.js";
+import { preferBuiltinAntigravity } from "./builtin-antigravity.js";
 import type {
 	AccountInfo,
+	AntigravitySettingsInput,
 	ActiveState,
 	CommandInfo,
 	GuiSettings,
@@ -297,8 +304,11 @@ export class Driver {
 	private static readonly CATALOG_URL =
 		"https://raw.githubusercontent.com/kuaai/heipang-releases/main/models-catalog.json";
 
+	private antigravitySettings: AntigravitySettingsStore;
+
 	constructor() {
 		this.agentDir = getAgentDir();
+		this.antigravitySettings = new AntigravitySettingsStore(this.agentDir);
 		this.modelRuntimePromise = this.createModelRuntime();
 		this.settings = SettingsManager.create(homedir(), this.agentDir);
 		// Bound recovery per application without changing shared CLI settings.
@@ -312,7 +322,8 @@ export class Driver {
 			cwd: homedir(),
 			agentDir: this.agentDir,
 			settingsManager: this.settings,
-			extensionFactories: [antigravityExtension],
+			extensionFactories: [antigravityExtension, antigravitySearch, antigravityImage],
+			extensionsOverride: preferBuiltinAntigravity,
 		});
 		this.guiSettings = this.loadGuiSettings();
 		void this.loadCatalog().catch(() => {}); // warm the latest-models cache on startup
@@ -413,7 +424,9 @@ export class Driver {
 			modelsPath: join(this.agentDir, "models.json"),
 			allowModelNetwork: false, // keep startup offline-fast; catalogs are refreshed separately
 		});
-		registerAntigravityToRuntime(runtime);
+		runtime.registerNativeProvider(antigravityProvider(streamAntigravity));
+		// Override shared OAuth credentials in memory without changing CLI authentication.
+		if (hasRelayConfiguration()) await runtime.setRuntimeApiKey("antigravity", "heipang-relay");
 		return runtime;
 	}
 
@@ -1631,9 +1644,10 @@ export class Driver {
 		const runtime = await this.runtime();
 		return runtime
 			.getProviders()
-			.filter((p) => (p.auth?.oauth && p.id !== "github-copilot") || p.id === "deepseek")
-			.map((p) => ({ id: p.id, name: p.name ?? p.id, connected: runtime.hasConfiguredAuth(p.id),
-				authType: p.id === "deepseek" ? "api_key" as const : "oauth" as const }));
+			.filter((p) => (p.auth?.oauth && p.id !== "github-copilot") || p.id === "deepseek" || p.id === "antigravity")
+			.map((p) => ({ id: p.id, name: p.name ?? p.id,
+				connected: p.id === "antigravity" ? hasRelayConfiguration() : runtime.hasConfiguredAuth(p.id),
+				authType: p.id === "antigravity" ? "relay" as const : p.id === "deepseek" ? "api_key" as const : "oauth" as const }));
 	}
 
 	async deleteExtension(path: string): Promise<void> {
@@ -1660,7 +1674,30 @@ export class Driver {
 		}
 	}
 
+	getAntigravitySettings() {
+		return this.antigravitySettings.get();
+	}
+
+	async saveAntigravitySettings(input: AntigravitySettingsInput): Promise<{ ok: boolean; error?: string; warning?: string }> {
+		try {
+			await this.antigravitySettings.save(input);
+			const runtime = await this.runtime();
+			await runtime.setRuntimeApiKey("antigravity", "heipang-relay");
+			const refreshed = await runtime.refresh({ providers: ["antigravity"], allowNetwork: true, force: true });
+			const enabled = this.settings.getEnabledModels() ?? [];
+			if (enabled.length > 0) {
+				this.settings.setEnabledModels([...new Set([...enabled, ...runtime.getModels("antigravity").map((model) => `antigravity/${model.id}`)])]);
+				await this.settings.flush();
+			}
+			const error = refreshed.errors.get("antigravity");
+			return error ? { ok: true, warning: "Connected, but model refresh failed. Retry from Models → Antigravity." } : { ok: true };
+		} catch (error) {
+			return { ok: false, error: error instanceof Error ? error.message : String(error) };
+		}
+	}
+
 	async loginAccount(id: string): Promise<{ ok: boolean; error?: string }> {
+		if (id === "antigravity") return { ok: false, error: "Configure the relay URL and key in Accounts." };
 		if (!this.oauthBridge) return { ok: false, error: "OAuth bridge unavailable" };
 		const bridge = this.oauthBridge;
 		let authUrl = "";
@@ -1725,6 +1762,11 @@ export class Driver {
 	}
 
 	async logoutAccount(id: string): Promise<void> {
+		if (id === "antigravity") {
+			this.antigravitySettings.clear();
+			await (await this.runtime()).removeRuntimeApiKey(id);
+			return;
+		}
 		await (await this.runtime()).logout(id);
 	}
 

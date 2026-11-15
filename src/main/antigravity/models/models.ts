@@ -1,182 +1,24 @@
-import type { ProviderModelConfig } from "@earendil-works/pi-coding-agent";
-
-type ProviderChatModelConfig = Extract<ProviderModelConfig, { reasoning: boolean }>;
-import type { AntigravityRouting, ThinkingWire } from "../types/types.js";
+import type { AntigravityRouting, ChatModelConfig } from "../types/types.js";
 import { ThinkingEffort } from "../types/enums.js";
 import type { AntigravityCatalog } from "./grouping.js";
 
 export const PROVIDER_ID = "antigravity";
 export const PROVIDER_NAME = "Antigravity";
 
-/**
- * Public selectable model IDs → backend request model IDs by thinking effort.
- *
- * Catalog mirrors `agy models` (Antigravity CLI), which currently advertises:
- * - Gemini 3.8 Flash (Low / Medium / High)
- * - Gemini 3.7 Flash (Low / Medium / High)
- * - Gemini 3.6 Flash (Low / Medium / High)
- * - Gemini 3.5 Flash (Low / Medium / High)
- * - Gemini 3.1 Pro (Low / High)
- * - Claude Sonnet 4.6 (Thinking)
- * - Claude Opus 4.6 (Thinking)
- * - GPT-OSS 120B (Medium)
- *
- * Pi exposes those as public model IDs and only surfaces the exact thinking levels
- * advertised by the backend for each model.
- */
-export const ANTIGRAVITY_ROUTING: Record<string, AntigravityRouting> = {
-  "claude-opus-4-6": {
-    routing: {
-      minimal: "claude-opus-4-6-thinking",
-      low: "claude-opus-4-6-thinking",
-      medium: "claude-opus-4-6-thinking",
-      high: "claude-opus-4-6-thinking",
-    },
-    defaultRequestId: "claude-opus-4-6-thinking",
-  },
-  // Live fetchAvailableModels exposes `claude-sonnet-4-6` (display: Thinking), not a separate *-thinking id.
-  "claude-sonnet-4-6": {
-    off: "claude-sonnet-4-6",
-    routing: {
-      minimal: "claude-sonnet-4-6",
-      low: "claude-sonnet-4-6",
-      medium: "claude-sonnet-4-6",
-      high: "claude-sonnet-4-6",
-      xhigh: "claude-sonnet-4-6",
-    },
-    defaultRequestId: "claude-sonnet-4-6",
-  },
-  "gemini-3.1-pro": {
-    // `gemini-3.1-pro-high` is advertised but currently 400s for agent streamGenerateContent;
-    // `gemini-pro-agent` is the working High runtime id (same display name in fetchAvailableModels).
-    off: "gemini-3.1-pro-low",
-    routing: {
-      minimal: "gemini-3.1-pro-low",
-      low: "gemini-3.1-pro-low",
-      medium: "gemini-3.1-pro-low",
-      high: "gemini-pro-agent",
-      xhigh: "gemini-pro-agent",
-    },
-    defaultRequestId: "gemini-3.1-pro-low",
-  },
-  "gemini-3.8-flash": {
-    off: "gemini-3.8-flash-low",
-    routing: {
-      minimal: "gemini-3.8-flash-low",
-      low: "gemini-3.8-flash-low",
-      medium: "gemini-3.8-flash-medium",
-      high: "gemini-3.8-flash-high",
-      xhigh: "gemini-3.8-flash-high",
-    },
-    defaultRequestId: "gemini-3.8-flash-low",
-  },
-  "gemini-3.7-flash": {
-    off: "gemini-3.7-flash-low",
-    routing: {
-      minimal: "gemini-3.7-flash-low",
-      low: "gemini-3.7-flash-low",
-      medium: "gemini-3.7-flash-medium",
-      high: "gemini-3.7-flash-high",
-      xhigh: "gemini-3.7-flash-high",
-    },
-    defaultRequestId: "gemini-3.7-flash-low",
-  },
-  "gemini-3.6-flash": {
-    // agy models: gemini-3.6-flash-low / -medium / -high
-    off: "gemini-3.6-flash-low",
-    routing: {
-      minimal: "gemini-3.6-flash-low",
-      low: "gemini-3.6-flash-low",
-      medium: "gemini-3.6-flash-medium",
-      high: "gemini-3.6-flash-high",
-      xhigh: "gemini-3.6-flash-high",
-    },
-    defaultRequestId: "gemini-3.6-flash-low",
-  },
-  "gemini-3.5-flash": {
-    off: "gemini-3.5-flash-extra-low",
-    routing: {
-      minimal: "gemini-3.5-flash-extra-low",
-      low: "gemini-3.5-flash-extra-low",
-      medium: "gemini-3.5-flash-low",
-      high: "gemini-3-flash-agent",
-      xhigh: "gemini-3-flash-agent",
-    },
-    defaultRequestId: "gemini-3.5-flash-extra-low",
-  },
-  "gpt-oss-120b": {
-    off: "gpt-oss-120b-medium",
-    routing: {
-      minimal: "gpt-oss-120b-medium",
-      low: "gpt-oss-120b-medium",
-      medium: "gpt-oss-120b-medium",
-      high: "gpt-oss-120b-medium",
-    },
-    defaultRequestId: "gpt-oss-120b-medium",
-  },
-};
+/** One row of the static catalog: Pi's model config plus the routing that model needs. */
+export type KnownModel = ChatModelConfig & { routing: AntigravityRouting };
 
 /**
- * Verified maximum output tokens accepted by the Cloud Code Assist backend per model/runtime ID.
- * Requesting more than these limits returns a 400 Bad Request from the API.
+ * Static catalog: everything this extension knows about the models `agy models`
+ * currently advertises, collapsed to public Pi model IDs.
+ *
+ * This is the conservative fallback and the routing reference; a successful
+ * discovery replaces the selectable list with what the account actually gets.
+ * `catalog` holds what the account advertised last; `staticCatalog` is the seed.
+ *
+ * One row per public model. Per-effort runtime ids, output ceiling, cost, and
+ * capability all live in that row so a new model is one entry, not four tables.
  */
-export const RUNTIME_MAX_OUTPUT_TOKENS: Record<string, number> = {
-  "gemini-3.8-flash": 65536,
-  "gemini-3.8-flash-low": 65536,
-  "gemini-3.8-flash-medium": 65536,
-  "gemini-3.8-flash-high": 65536,
-  "gemini-3.7-flash": 65536,
-  "gemini-3.7-flash-tiered": 65536,
-  // Retain rollout-era IDs for compatibility with pinned runtime overrides.
-  "gemini-3.7-flash-low": 65536,
-  "gemini-3.7-flash-medium": 65536,
-  "gemini-3.7-flash-high": 65536,
-  "gemini-3.6-flash": 65536,
-  "gemini-3.6-flash-low": 65536,
-  "gemini-3.6-flash-medium": 65536,
-  "gemini-3.6-flash-high": 65536,
-  "gemini-3.5-flash": 65536,
-  "gemini-3.5-flash-extra-low": 65536,
-  "gemini-3.5-flash-low": 65536,
-  "gemini-3-flash-agent": 65536,
-  "gemini-3.1-pro": 65535,
-  "gemini-3.1-pro-low": 65535,
-  "gemini-3.1-pro-high": 65535,
-  "gemini-pro-agent": 65535,
-  "claude-opus-4-6": 64000,
-  "claude-opus-4-6-thinking": 64000,
-  "claude-sonnet-4-6": 64000,
-  "gpt-oss-120b": 32768,
-  "gpt-oss-120b-medium": 32768,
-};
-
-export function getMaxOutputTokens(modelId: string, runtimeModel?: string): number {
-  // Refreshed (and restored) catalog limits take precedence over static defaults.
-  const discovered = currentModels.find((model) => model.id === modelId);
-  if (
-    currentModels !== ANTIGRAVITY_MODELS &&
-    discovered &&
-    "maxTokens" in discovered &&
-    typeof discovered.maxTokens === "number"
-  ) {
-    return discovered.maxTokens;
-  }
-  if (runtimeModel && RUNTIME_MAX_OUTPUT_TOKENS[runtimeModel] !== undefined) {
-    return RUNTIME_MAX_OUTPUT_TOKENS[runtimeModel];
-  }
-  if (RUNTIME_MAX_OUTPUT_TOKENS[modelId] !== undefined) {
-    return RUNTIME_MAX_OUTPUT_TOKENS[modelId];
-  }
-  if (runtimeModel) {
-    if (runtimeModel.startsWith("claude-")) return 64000;
-    if (runtimeModel.startsWith("gpt-oss-")) return 32768;
-    if (runtimeModel.startsWith("gemini-3.1-pro") || runtimeModel === "gemini-pro-agent")
-      return 65535;
-    if (runtimeModel.startsWith("gemini-")) return 65536;
-  }
-  return 8192;
-}
-
 const geminiFlashCost = { input: 0.1, output: 0.4, cacheRead: 0.025, cacheWrite: 0.1 };
 const geminiProCost = { input: 1.25, output: 5.0, cacheRead: 0.3125, cacheWrite: 1.25 };
 const claudeSonnetCost = { input: 3.0, output: 15.0, cacheRead: 0.3, cacheWrite: 3.75 };
@@ -222,10 +64,9 @@ const thinkingLevelMaps = {
     xhigh: null,
     max: null,
   },
-} satisfies Record<string, ProviderChatModelConfig["thinkingLevelMap"]>;
+} satisfies Record<string, ChatModelConfig["thinkingLevelMap"]>;
 
-/** Same set as `agy models`, collapsed to public Pi model IDs. */
-export const ANTIGRAVITY_MODELS: ProviderModelConfig[] = [
+export const ANTIGRAVITY_MODELS: KnownModel[] = [
   {
     id: "gemini-3.8-flash",
     name: "Gemini 3.8 Flash (Antigravity)",
@@ -235,6 +76,17 @@ export const ANTIGRAVITY_MODELS: ProviderModelConfig[] = [
     cost: geminiFlashCost,
     contextWindow: 1048576,
     maxTokens: 65536,
+    routing: {
+      off: "gemini-3.8-flash-low",
+      routing: {
+        minimal: "gemini-3.8-flash-low",
+        low: "gemini-3.8-flash-low",
+        medium: "gemini-3.8-flash-medium",
+        high: "gemini-3.8-flash-high",
+        xhigh: "gemini-3.8-flash-high",
+      },
+      defaultRequestId: "gemini-3.8-flash-low",
+    },
   },
   {
     id: "gemini-3.7-flash",
@@ -245,6 +97,17 @@ export const ANTIGRAVITY_MODELS: ProviderModelConfig[] = [
     cost: geminiFlashCost,
     contextWindow: 1048576,
     maxTokens: 65536,
+    routing: {
+      off: "gemini-3.7-flash-low",
+      routing: {
+        minimal: "gemini-3.7-flash-low",
+        low: "gemini-3.7-flash-low",
+        medium: "gemini-3.7-flash-medium",
+        high: "gemini-3.7-flash-high",
+        xhigh: "gemini-3.7-flash-high",
+      },
+      defaultRequestId: "gemini-3.7-flash-low",
+    },
   },
   {
     id: "gemini-3.6-flash",
@@ -255,6 +118,17 @@ export const ANTIGRAVITY_MODELS: ProviderModelConfig[] = [
     cost: geminiFlashCost,
     contextWindow: 1048576,
     maxTokens: 65536,
+    routing: {
+      off: "gemini-3.6-flash-low",
+      routing: {
+        minimal: "gemini-3.6-flash-low",
+        low: "gemini-3.6-flash-low",
+        medium: "gemini-3.6-flash-medium",
+        high: "gemini-3.6-flash-high",
+        xhigh: "gemini-3.6-flash-high",
+      },
+      defaultRequestId: "gemini-3.6-flash-low",
+    },
   },
   {
     id: "claude-opus-4-6",
@@ -265,6 +139,15 @@ export const ANTIGRAVITY_MODELS: ProviderModelConfig[] = [
     cost: claudeOpusCost,
     contextWindow: 250000,
     maxTokens: 64000,
+    routing: {
+      routing: {
+        minimal: "claude-opus-4-6-thinking",
+        low: "claude-opus-4-6-thinking",
+        medium: "claude-opus-4-6-thinking",
+        high: "claude-opus-4-6-thinking",
+      },
+      defaultRequestId: "claude-opus-4-6-thinking",
+    },
   },
   {
     id: "claude-sonnet-4-6",
@@ -275,6 +158,17 @@ export const ANTIGRAVITY_MODELS: ProviderModelConfig[] = [
     cost: claudeSonnetCost,
     contextWindow: 200000,
     maxTokens: 64000,
+    routing: {
+      off: "claude-sonnet-4-6",
+      routing: {
+        minimal: "claude-sonnet-4-6",
+        low: "claude-sonnet-4-6",
+        medium: "claude-sonnet-4-6",
+        high: "claude-sonnet-4-6",
+        xhigh: "claude-sonnet-4-6",
+      },
+      defaultRequestId: "claude-sonnet-4-6",
+    },
   },
   {
     id: "gemini-3.1-pro",
@@ -285,6 +179,17 @@ export const ANTIGRAVITY_MODELS: ProviderModelConfig[] = [
     cost: geminiProCost,
     contextWindow: 1048576,
     maxTokens: 65535,
+    routing: {
+      off: "gemini-3.1-pro-low",
+      routing: {
+        minimal: "gemini-3.1-pro-low",
+        low: "gemini-3.1-pro-low",
+        medium: "gemini-3.1-pro-low",
+        high: "gemini-pro-agent",
+        xhigh: "gemini-pro-agent",
+      },
+      defaultRequestId: "gemini-3.1-pro-low",
+    },
   },
   {
     id: "gemini-3.5-flash",
@@ -295,6 +200,17 @@ export const ANTIGRAVITY_MODELS: ProviderModelConfig[] = [
     cost: geminiFlashCost,
     contextWindow: 1048576,
     maxTokens: 65536,
+    routing: {
+      off: "gemini-3.5-flash-extra-low",
+      routing: {
+        minimal: "gemini-3.5-flash-extra-low",
+        low: "gemini-3.5-flash-extra-low",
+        medium: "gemini-3.5-flash-low",
+        high: "gemini-3-flash-agent",
+        xhigh: "gemini-3-flash-agent",
+      },
+      defaultRequestId: "gemini-3.5-flash-extra-low",
+    },
   },
   {
     id: "gpt-oss-120b",
@@ -305,35 +221,78 @@ export const ANTIGRAVITY_MODELS: ProviderModelConfig[] = [
     cost: gptOssCost,
     contextWindow: 131072,
     maxTokens: 32768,
+    routing: {
+      off: "gpt-oss-120b-medium",
+      routing: {
+        minimal: "gpt-oss-120b-medium",
+        low: "gpt-oss-120b-medium",
+        medium: "gpt-oss-120b-medium",
+        high: "gpt-oss-120b-medium",
+      },
+      defaultRequestId: "gpt-oss-120b-medium",
+    },
   },
 ];
 
-let currentModels: ProviderModelConfig[] = ANTIGRAVITY_MODELS;
-let currentRouting: Record<string, AntigravityRouting> = { ...ANTIGRAVITY_ROUTING };
+/** The seed routing table, derived so the two cannot drift. */
+export const ANTIGRAVITY_ROUTING: Record<string, AntigravityRouting> = Object.fromEntries(
+  ANTIGRAVITY_MODELS.map((model) => [model.id, model.routing]),
+);
 
-export function getCurrentAntigravityModels(): ProviderModelConfig[] {
-  return currentModels;
+/** Runtime ids a known model can be routed to. */
+function runtimeIdsOf(model: KnownModel): string[] {
+  const { off, routing, defaultRequestId } = model.routing;
+  return [off, defaultRequestId, ...Object.values(routing ?? {})].filter(
+    (id): id is string => typeof id === "string" && id.length > 0,
+  );
 }
+
+function knownModelFor(id: string): KnownModel | undefined {
+  return ANTIGRAVITY_MODELS.find((model) => model.id === id || runtimeIdsOf(model).includes(id));
+}
+
+/** Ceiling for a runtime id this extension has never seen, e.g. a newly advertised family. */
+function fallbackMaxOutputTokens(id: string): number {
+  if (id.startsWith("claude-")) return 64000;
+  if (id.startsWith("gpt-oss-")) return 32768;
+  if (id.startsWith("gemini-3.1-pro") || id === "gemini-pro-agent") return 65535;
+  if (id.startsWith("gemini-")) return 65536;
+  return 8192;
+}
+
+export function getMaxOutputTokens(modelId: string, runtimeModel?: string): number {
+  // A refreshed (or restored) catalog is authoritative for the models it advertises.
+  const advertised = catalog.find((model) => model.id === modelId);
+  if (hasDiscoveredCatalog && advertised) return advertised.maxTokens;
+  const known = knownModelFor(modelId) ?? (runtimeModel ? knownModelFor(runtimeModel) : undefined);
+  if (known) return known.maxTokens;
+  return fallbackMaxOutputTokens(runtimeModel ?? modelId);
+}
+
+let catalog: KnownModel[] | ChatModelConfig[] = ANTIGRAVITY_MODELS;
+let currentRouting: Record<string, AntigravityRouting> = { ...ANTIGRAVITY_ROUTING };
+let hasDiscoveredCatalog = false;
 
 export function getCurrentAntigravityRouting(): Record<string, AntigravityRouting> {
   return currentRouting;
 }
 
 export function getCurrentAntigravityCatalog(): AntigravityCatalog {
-  return { models: currentModels, routing: currentRouting };
+  return { models: catalog, routing: currentRouting };
 }
 
-export function applyAntigravityCatalog(catalog: AntigravityCatalog): void {
-  currentModels = catalog.models;
-  currentRouting = catalog.routing;
+export function applyAntigravityCatalog(next: AntigravityCatalog): void {
+  catalog = next.models;
+  currentRouting = next.routing;
+  hasDiscoveredCatalog = true;
 }
 
 export function resetAntigravityCatalogForTests(): void {
-  currentModels = ANTIGRAVITY_MODELS;
+  catalog = ANTIGRAVITY_MODELS;
   currentRouting = { ...ANTIGRAVITY_ROUTING };
+  hasDiscoveredCatalog = false;
 }
 
-/** Resolve public model id + thinking effort to Antigravity runtime model id. */
 export function getAntigravityRequestModelId(modelId: string, effort: string | undefined): string {
   const r = currentRouting[modelId] ?? ANTIGRAVITY_ROUTING[modelId];
   if (!r) return modelId;
@@ -388,27 +347,22 @@ export function getFallbackRuntimeModel(runtimeModel: string, effort?: string): 
   return undefined;
 }
 
-export type { ThinkingWire };
-
 export const ANTIGRAVITY_MODEL_ENUM: Record<string, string> = {
   // Gemini 3.8 Flash
   "gemini-3.8-flash": "MODEL_PLACEHOLDER_M318",
   "gemini-3.8-flash-high": "MODEL_PLACEHOLDER_M318",
   "gemini-3.8-flash-medium": "MODEL_PLACEHOLDER_M319",
   "gemini-3.8-flash-low": "MODEL_PLACEHOLDER_M320",
-  "gemini-3.8-flash-tiered": "MODEL_PLACEHOLDER_M322",
   // Gemini 3.7 Flash
   "gemini-3.7-flash": "MODEL_PLACEHOLDER_M298",
   "gemini-3.7-flash-high": "MODEL_PLACEHOLDER_M298",
   "gemini-3.7-flash-medium": "MODEL_PLACEHOLDER_M299",
   "gemini-3.7-flash-low": "MODEL_PLACEHOLDER_M300",
-  "gemini-3.7-flash-tiered": "MODEL_PLACEHOLDER_M301",
   // Gemini 3.6 Flash
   "gemini-3.6-flash": "MODEL_PLACEHOLDER_M71",
   "gemini-3.6-flash-high": "MODEL_PLACEHOLDER_M71",
   "gemini-3.6-flash-medium": "MODEL_PLACEHOLDER_M72",
   "gemini-3.6-flash-low": "MODEL_PLACEHOLDER_M73",
-  "gemini-3.6-flash-tiered": "MODEL_PLACEHOLDER_M196",
   // Gemini 3.5 Flash
   "gemini-3.5-flash": "MODEL_PLACEHOLDER_M20",
   "gemini-3.5-flash-extra-low": "MODEL_PLACEHOLDER_M187",
@@ -475,45 +429,4 @@ export function restoreDynamicModelEnums(modelEnums: Record<string, string>): vo
 
 export function clearModelEnumCache(): void {
   modelEnumCache.clear();
-}
-
-export function getThinkingConfig(
-  modelId: string,
-  effort: string | undefined,
-): ThinkingWire | undefined {
-  if (modelId.startsWith("claude-")) {
-    if (!effort || effort === "off") return { includeThoughts: false, thinkingBudget: 0 };
-    return { includeThoughts: true, thinkingBudget: 1024 };
-  }
-  if (modelId.startsWith("gpt-oss-")) {
-    if (!effort || effort === "off") return { includeThoughts: false, thinkingBudget: 0 };
-    return { includeThoughts: true, thinkingBudget: 8192 };
-  }
-  if (modelId.startsWith("gemini-3.5-flash") || modelId === "gemini-3-flash-agent") {
-    if (!effort || effort === "off") return { includeThoughts: false, thinkingBudget: 0 };
-    const thinkingBudget =
-      effort === "high" || effort === "xhigh" ? 10_000 : effort === "medium" ? 4_000 : 1_000;
-    return { includeThoughts: true, thinkingBudget };
-  }
-  if (modelId.startsWith("gemini-3.1-pro") || modelId === "gemini-pro-agent") {
-    if (!effort || effort === "off") return { includeThoughts: false, thinkingBudget: 0 };
-    return {
-      includeThoughts: true,
-      thinkingBudget: effort === "high" || effort === "xhigh" ? 10_001 : 1_001,
-    };
-  }
-  // Gemini 4 Argon rejects thinkingBudget 0 and any budget under 1000 (#93).
-  if (modelId.includes("argon") || modelId.startsWith("gemini-4")) {
-    if (!effort || effort === "off") return undefined;
-    const thinkingBudget =
-      effort === "high" || effort === "xhigh" ? -1 : effort === "medium" ? 4_000 : 1_000;
-    return { includeThoughts: true, thinkingBudget };
-  }
-  if (modelId.startsWith("gemini-")) {
-    if (!effort || effort === "off") return { includeThoughts: false, thinkingBudget: 0 };
-    const thinkingBudget =
-      effort === "high" || effort === "xhigh" ? -1 : effort === "medium" ? 4_000 : 1_000;
-    return { includeThoughts: true, thinkingBudget };
-  }
-  return undefined;
 }

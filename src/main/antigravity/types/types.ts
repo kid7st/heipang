@@ -1,4 +1,5 @@
-import type { Server } from "node:http";
+import type { ProviderModelConfig } from "@earendil-works/pi-coding-agent";
+import type { AntigravityRequestState } from "../wire/session.js";
 import type {
   OAuthCredentials,
   SimpleStreamOptions,
@@ -7,6 +8,9 @@ import type {
   ToolCall,
 } from "@earendil-works/pi-ai";
 import type { GeminiRole, GeminiToolCallingMode, ThinkingEffort, ToolChoice } from "./enums.js";
+
+/** Pi's model-config union also covers image and classifier models; this extension registers chat models. */
+export type ChatModelConfig = Extract<ProviderModelConfig, { reasoning: boolean }>;
 
 // OAuth & Auth Types
 export type AntigravityOAuthCredentials = OAuthCredentials & {
@@ -17,6 +21,8 @@ export type AntigravityOAuthCredentials = OAuthCredentials & {
 export type AntigravityApiKey = {
   token: string;
   projectId: string;
+  /** Stable, non-reversible id of the signed-in account; unlike the token it survives renewal. */
+  account?: string;
 };
 
 export type DynamicModelInfo = {
@@ -28,7 +34,6 @@ export type DynamicModelInfo = {
 };
 
 export type CallbackServer = {
-  server: Server;
   waitForCode: () => Promise<{ code: string; state: string }>;
   cleanup: () => void;
 };
@@ -42,10 +47,10 @@ export type AntigravityRouting = {
 
 // Stream & API Types
 export const ANTIGRAVITY_API = "antigravity-api" as const;
-export type AntigravityApi = typeof ANTIGRAVITY_API;
 
 export type AntigravityStreamOptions = Omit<SimpleStreamOptions, "toolChoice"> & {
   toolChoice?: ToolChoice;
+  reserveRequestState?: () => AntigravityRequestState;
 };
 
 export type GeminiTextPart = { text: string; thoughtSignature?: string };
@@ -57,17 +62,17 @@ export type GeminiThoughtPart = {
 };
 export type GeminiFunctionCallPart = {
   functionCall: {
+    id?: string;
     name: string;
     args: Record<string, unknown>;
-    id?: string;
   };
   thoughtSignature?: string;
 };
 export type GeminiFunctionResponsePart = {
   functionResponse: {
+    id?: string;
     name: string;
     response: { error: string } | { output: string };
-    id?: string;
   };
 };
 export type GeminiPart =
@@ -95,9 +100,11 @@ export type GeminiToolConfig = {
   };
 };
 
+/** agy sends a level name, or a bare number for the levels its enum does not name. */
 export type ThinkingWire = {
   includeThoughts: boolean;
-  thinkingBudget: number;
+  thinkingLevel?: "LOW" | "MEDIUM" | "HIGH" | number;
+  thinkingBudget?: number;
 };
 
 export type GeminiGenerationConfig = {

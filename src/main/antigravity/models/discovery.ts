@@ -6,12 +6,9 @@ import type {
   ModelsStoreEntry,
   RefreshModelsContext,
 } from "@earendil-works/pi-ai";
-import type { ProviderModelConfig } from "@earendil-works/pi-coding-agent";
-
-type ProviderChatModelConfig = Extract<ProviderModelConfig, { reasoning: boolean }>;
-import { getApiKey } from "../auth/index.js";
 import { DEFAULT_ENDPOINT, fetchAvailableModelsCatalog, parseApiKey } from "../client/index.js";
 import { ANTIGRAVITY_API } from "../types/types.js";
+import type { ChatModelConfig } from "../types/types.js";
 import { antigravityEnv, isRecord } from "../utils/util.js";
 import { buildAntigravityCatalog, resolvedCatalog, type AntigravityCatalog } from "./grouping.js";
 import {
@@ -80,7 +77,7 @@ export async function discoverAntigravityModels(
 
 export async function refreshAntigravityModels(
   context: RefreshModelsContext,
-): Promise<ProviderModelConfig[]> {
+): Promise<ChatModelConfig[]> {
   const checkedAt = hydrateAntigravityCatalog(context.stored);
   const current = getCurrentAntigravityCatalog();
   if (!context.allowNetwork) return current.models;
@@ -90,13 +87,11 @@ export async function refreshAntigravityModels(
 
   // A different account/project or pre-upgrade cache must not suppress a fresh
   // discovery. Keep hydration above so offline startup still has usable models.
+  // Identify the source by account and project: the access token rotates hourly and must not
+  // invalidate a catalog that is still fresh.
+  const source = parseApiKey(apiKey);
   const credentialKey = createHash("sha256")
-    .update(
-      JSON.stringify([
-        context.credential?.type === "oauth" ? context.credential.refresh : apiKey,
-        parseApiKey(apiKey).projectId,
-      ]),
-    )
+    .update(JSON.stringify([source.account ?? "", source.projectId]))
     .digest("hex");
   const stored: unknown = context.stored;
   const persisted = isRecord(stored) ? stored[ANTIGRAVITY_PERSIST_KEY] : undefined;
@@ -163,25 +158,14 @@ function apiKeyFromCredential(credential: Credential | undefined): string | unde
   if (credential.type === "api_key") {
     return typeof credential.key === "string" && credential.key ? credential.key : undefined;
   }
-  if (credential.type === "oauth" && typeof credential.access === "string") {
-    return getApiKey(credential);
-  }
   return undefined;
 }
 
-function toStoredModels(models: ProviderModelConfig[]): Model<Api>[] {
-  return models.map((model) => {
-    const chat = model as ProviderChatModelConfig;
-    return {
-      ...chat,
-      reasoning: chat.reasoning ?? false,
-      contextWindow: chat.contextWindow ?? 128000,
-      maxTokens: chat.maxTokens ?? 8192,
-      input: chat.input ?? ["text"],
-      cost: chat.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      api: ANTIGRAVITY_API,
-      provider: "antigravity",
-      baseUrl: DEFAULT_ENDPOINT,
-    } as unknown as Model<Api>;
-  });
+function toStoredModels(models: ChatModelConfig[]): Model<Api>[] {
+  return models.map((model) => ({
+    ...model,
+    api: ANTIGRAVITY_API,
+    provider: "antigravity",
+    baseUrl: DEFAULT_ENDPOINT,
+  }));
 }

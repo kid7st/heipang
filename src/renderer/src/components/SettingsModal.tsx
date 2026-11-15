@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { AntigravityAccount } from "./AntigravityAccount";
 import type {
 	AccountInfo,
 	GuiSettings,
@@ -263,7 +264,12 @@ export function SettingsModal({
 				{tab === "accounts" && (
 					<div className="tab-body card-grid">
 						{!accounts && <div className="setting-note">Loading…</div>}
-						{accounts?.map((a) => (
+						{accounts?.map((a) => a.id === "antigravity" ? (
+							<AntigravityAccount key={a.id} connected={a.connected} onChanged={async () => {
+								await loadAccounts();
+								onModelsChange(await window.pi.listModels());
+							}} />
+						) : (
 							<div className="card account-card" key={a.id}>
 								<div className="account-top">
 									<span className="account-name">{a.name}</span>
@@ -284,7 +290,7 @@ export function SettingsModal({
 								)}
 							</div>
 						))}
-						<div className="setting-note">Claude / ChatGPT / Antigravity use browser sign-in. DeepSeek uses its own API key and prepaid API balance, separate from those subscriptions.</div>
+						<div className="setting-note">Claude / ChatGPT use browser sign-in. Antigravity uses a relay URL and key. DeepSeek uses its own API key and prepaid API balance.</div>
 					</div>
 				)}
 

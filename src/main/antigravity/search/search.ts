@@ -1,53 +1,26 @@
-import { lookup } from "node:dns/promises";
-import { isIP } from "node:net";
+import { antigravityTransport } from "../client/transport.js";
 
-import {
-  antigravityHeaders,
-  endpointCandidates,
-  jsonOrTextError,
-  parseApiKey,
-} from "../client/client.js";
+import { antigravityEndpoint, antigravityHeaders, parseApiKey } from "../client/client.js";
 import { AntigravityRequestType, AntigravityUserAgent, GeminiRole } from "../types/enums.js";
-import { antigravityFetch } from "../utils/http.js";
-import { safeError } from "../utils/security.js";
-import { antigravityEnv, antigravityRequestEnvelope, isRecord } from "../utils/util.js";
+import { isRecord } from "../utils/util.js";
+import { describeAntigravityFailure } from "../wire/index.js";
 
-/** Default search model: fast grounding model for interactive tool calls. */
-export const DEFAULT_SEARCH_MODEL = "gemini-3.5-flash-lite";
+/** The search model agy uses, and the only one this request is built for. */
+export const SEARCH_MODEL = "gemini-3.5-flash-lite";
 
-/** Fallback runtime candidates if the primary model is missing or out of capacity. */
-export const SEARCH_MODEL_FALLBACKS = [
-  DEFAULT_SEARCH_MODEL,
-  "gemini-3.1-flash-lite",
-  "gemini-3-flash",
-] as const;
+/** agy's search instruction, verbatim: the model must search, not converse. */
+export const SEARCH_SYSTEM_INSTRUCTION =
+  "You are a search engine bot. You will be given a query from a user. Your task is to search the web for relevant information that will help the user. You MUST perform a web search. Do not respond or interact with the user, please respond as if they typed the query into a search bar.";
 
-export const SEARCH_SYSTEM_INSTRUCTION = `You are a careful research assistant using Google Search grounding.
-Return a compact evidence brief with exactly these sections:
-## Findings
-## Gaps
-## Next checks
-
-Rules:
-- Verify each claim inside the specific item, function, or section it refers to. Do not copy an attribute from a neighboring entry on the same page.
-- Prefer primary documentation and exact names, versions, and constraints over marketing summaries.
-- If a fact is not supported by a retrieved source, put it under Gaps instead of stating it as a finding.
-- Keep the brief short enough for an interactive agent tool call.`;
+/** Image results requested alongside the web sources, as agy asks for them. */
+const SEARCH_IMAGE_RESULT_COUNT = 5;
 
 export type SearchSource = {
   /** Original groundingChunks index, including gaps from skipped non-web chunks. */
   index?: number;
   title: string;
   url: string;
-  /**
-   * Destination recovered by following the grounding redirect. Google wraps every
-   * source in an opaque `.../grounding-api-redirect/<token>` URL whose path carries
-   * no information, so this is what citations should link to when available.
-   */
-  resolvedUrl?: string;
-  /** The page's `<title>` (or `og:title`), when it could be fetched. */
-  pageTitle?: string;
-  /** Rendered label: page title, else host plus readable path, else host. */
+  /** Rendered label: host plus readable path, or the advertised title. */
   label?: string;
 };
 
@@ -71,26 +44,18 @@ export type SearchResult = {
 export type ExecuteSearchOptions = {
   apiKey?: string;
   query: string;
-  instruction?: string;
-  urls?: string[];
-  thinking?: boolean;
+  domain?: string;
   signal?: AbortSignal;
 };
 
 export type SearchCommandArgs = {
   query: string;
-  urls?: string[];
-  thinking?: boolean;
+  domain?: string;
 };
 
 /**
  * Parse arguments for the interactive `/antigravity.search` command.
- * Supports flags:
- *   --thinking: enable deep reasoning for search planning
- *   --url <url>: pass target URL for context analysis (can be repeated)
- *
- * @param args - Raw string of CLI arguments.
- * @returns Parsed command arguments containing query, optional URLs, and thinking flag.
+ * `--domain <host>` narrows the search the way agy's `site:` hint does.
  */
 export function parseSearchCommandArgs(args: string): SearchCommandArgs {
   const tokens = args.trim().split(/\s+/).filter(Boolean);
@@ -101,14 +66,8 @@ export function parseSearchCommandArgs(args: string): SearchCommandArgs {
     const token = tokens[i];
     if (token === undefined) continue;
     const next = tokens[i + 1];
-
-    if (token === "--thinking") {
-      out.thinking = true;
-      continue;
-    }
-    if (token === "--url" && next) {
-      out.urls = out.urls ?? [];
-      out.urls.push(next);
+    if (token === "--domain" && next) {
+      out.domain = next;
       i += 1;
       continue;
     }
@@ -120,87 +79,40 @@ export function parseSearchCommandArgs(args: string): SearchCommandArgs {
 }
 
 /**
- * Builds the Antigravity wire request payload for Gemini Google Search Grounding.
- * Includes the required `requestType` and `requestId` envelope fields.
- *
- * @param options - Options including search query, lead agent directives, target URLs, and thinking preference.
- * @param model - Target model identifier (e.g., `gemini-3-flash`).
- * @param projectId - Google Cloud Project ID.
- * @returns Serialized request object matching the Antigravity wire contract.
+ * The web-search request agy sends: a lite Gemini model used as a search engine bot,
+ * with server-side Google Search grounding. It carries no request envelope, no
+ * session ids, and no labels — the backend treats it as a plain search, not a turn.
  */
 export function buildSearchRequest(
-  options: {
-    query: string;
-    instruction?: string;
-    urls?: string[];
-    thinking?: boolean;
-  },
+  options: { query: string; domain?: string },
   model: string,
   projectId: string,
 ): Record<string, unknown> {
-  let systemInstructionText = SEARCH_SYSTEM_INSTRUCTION;
-  if (options.instruction?.trim()) {
-    systemInstructionText += `\n\n[SPECIFIC DIRECTIVE FROM LEAD AGENT]:\n${options.instruction.trim()}\nYou MUST strictly follow this directive during search query formulation and synthesis.`;
-  }
+  const query = options.query.trim();
+  const text = options.domain ? `${query} site:${options.domain}` : query;
 
-  let prompt = options.query.trim();
-  if (options.instruction?.trim()) {
-    prompt = `[Lead Agent Directive]: ${options.instruction.trim()}\n\nSearch Query: ${prompt}`;
-  }
-  if (options.urls && options.urls.length > 0) {
-    prompt += `\n\nURLs to analyze in detail:\n${options.urls.join("\n")}`;
-  }
-
-  const tools: Array<Record<string, unknown>> = [{ googleSearch: {} }];
-  if (options.urls && options.urls.length > 0) {
-    tools.push({ urlContext: {} });
-  }
-
-  // Lite models and Gemini 4 reject an explicit zero budget (#84). Leave that config unset
-  // unless the caller opted into planning, or this is a non-Lite fallback.
-  const generationConfig: Record<string, unknown> = {};
-  if (options.thinking || (options.thinking === undefined && !model.includes("lite"))) {
-    generationConfig.thinkingConfig = {
-      thinkingBudget: options.thinking ? 4096 : 2048,
-      includeThoughts: false,
-    };
-  }
-  const envelope = antigravityRequestEnvelope(model, false);
-
+  // Key order is agy's, captured from a real 1.5.9 web_search request.
   return {
     project: projectId,
-    model,
     request: {
+      contents: [{ role: GeminiRole.User, parts: [{ text }] }],
       systemInstruction: {
         role: GeminiRole.User,
-        parts: [{ text: systemInstructionText }],
+        parts: [{ text: SEARCH_SYSTEM_INSTRUCTION }],
       },
-      contents: [
+      tools: [
         {
-          role: GeminiRole.User,
-          parts: [{ text: prompt }],
+          googleSearch: {
+            enhancedContent: { imageSearch: { maxResultCount: SEARCH_IMAGE_RESULT_COUNT } },
+          },
         },
       ],
-      tools,
-      generationConfig,
+      generationConfig: { candidateCount: 1 },
     },
-    requestType: AntigravityRequestType.Agent,
+    model,
     userAgent: AntigravityUserAgent.Antigravity,
-    requestId: envelope.requestId,
+    requestType: AntigravityRequestType.WebSearch,
   };
-}
-
-/** Read candidates from either the wrapped Antigravity or direct Gemini response. */
-function candidateList(data: unknown): unknown {
-  if (!isRecord(data)) return undefined;
-  if (isRecord(data.response)) return data.response.candidates;
-  return data.candidates;
-}
-
-/** Return the first array entry without assuming its response shape. */
-function firstUnknownItem(value: unknown): unknown {
-  if (!Array.isArray(value)) return undefined;
-  return (value as unknown[])[0];
 }
 
 /**
@@ -301,39 +213,6 @@ export function parseSearchResponse(data: unknown): SearchResult {
 /** Google wraps each source in this host; its path is an opaque token, not a readable path. */
 const GROUNDING_REDIRECT_HOST = "vertexaisearch.cloud.google.com";
 
-/** Budget for one redirect resolution or page title fetch. */
-const SOURCE_ENRICH_TIMEOUT_MS = 6_000;
-
-/** Parallel enrichment requests per search. */
-const SOURCE_ENRICH_CONCURRENCY = 6;
-
-/** Upper bound on bytes read while looking for the page title. */
-const PAGE_TITLE_BYTE_CAP = 64 * 1024;
-
-/** Redirect hops chased while looking for a page title. */
-const PAGE_TITLE_MAX_HOPS = 3;
-
-const SOURCE_CACHE_LIMIT = 500;
-const resolvedUrlCache = new Map<string, string>();
-const pageTitleCache = new Map<string, string>();
-
-/** Insert into a bounded cache, evicting the oldest entry once it is full. */
-function remember(map: Map<string, string>, key: string, value: string): void {
-  if (map.size >= SOURCE_CACHE_LIMIT) {
-    const oldest = map.keys().next().value;
-    if (oldest !== undefined) map.delete(oldest);
-  }
-  map.set(key, value);
-}
-
-/** Combined signal that still has a deadline when the caller supplied its own. */
-function withDeadline(signal: AbortSignal | undefined, ms: number): AbortSignal {
-  const timeout = AbortSignal.timeout(ms);
-  if (!signal) return timeout;
-  const anyFn = (AbortSignal as unknown as { any?: (signals: AbortSignal[]) => AbortSignal }).any;
-  return anyFn ? anyFn([signal, timeout]) : signal;
-}
-
 /** True when a grounding title is nothing but a host, which names no page by itself. */
 function isBareDomainTitle(title: string): boolean {
   return /^[a-z0-9.-]+\.[a-z]{2,}$/i.test(title);
@@ -345,65 +224,6 @@ function hostnameOf(url: string): string {
     return new URL(url).hostname;
   } catch {
     return url;
-  }
-}
-
-/**
- * True for an address this process must never be pointed at by a search result.
- *
- * `URL.hostname` keeps the brackets around an IPv6 literal, so they come off before the
- * check: `[::1]` would otherwise look like a hostname instead of an address.
- */
-export function isPrivateAddress(address: string): boolean {
-  const bare = address.startsWith("[") && address.endsWith("]") ? address.slice(1, -1) : address;
-  const version = isIP(bare);
-  if (version === 4) {
-    const [a = 0, b = 0] = bare.split(".").map(Number);
-    if (a === 0 || a === 10 || a === 127) return true;
-    if (a === 100 && b >= 64 && b <= 127) return true; // carrier-grade NAT
-    if (a === 169 && b === 254) return true; // link-local, and the metadata endpoint
-    if (a === 172 && b >= 16 && b <= 31) return true;
-    if (a === 192 && b === 168) return true;
-    if (a === 198 && (b === 18 || b === 19)) return true; // benchmarking range
-    return a >= 224; // multicast, then reserved
-  }
-  if (version === 6) {
-    const lowered = bare.toLowerCase();
-    if (lowered === "::" || lowered === "::1") return true;
-    if (/^f[cd]/.test(lowered)) return true; // unique local
-    if (/^fe[89ab]/.test(lowered)) return true; // link-local
-    const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(lowered)?.[1];
-    return mapped ? isPrivateAddress(mapped) : false;
-  }
-  return false;
-}
-
-/**
- * Whether a page URL is safe to request: http(s), a public literal, and not a name that
- * resolves somewhere internal.
- *
- * Resolving first narrows the window but does not close it, because `fetch` resolves
- * again when it connects. Closing it outright takes a private dispatcher, and this
- * provider deliberately leaves the host's proxy-aware dispatcher in place, so treat this
- * as a filter rather than as a guarantee.
- */
-async function isFetchablePageUrl(rawUrl: string): Promise<boolean> {
-  let parsed: URL;
-  try {
-    parsed = new URL(rawUrl);
-  } catch {
-    return false;
-  }
-  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
-  const host = parsed.hostname.toLowerCase().replace(/\.$/, "");
-  if (!host || isPrivateAddress(host)) return false;
-  if (/^(.*\.)?(localhost|local|internal|home\.arpa)$/.test(host)) return false;
-  if (isIP(host)) return true; // a public literal, already checked above
-  try {
-    const records = await lookup(host, { all: true });
-    return records.length > 0 && records.every((record) => !isPrivateAddress(record.address));
-  } catch {
-    return false;
   }
 }
 
@@ -429,223 +249,21 @@ function readablePath(url: string | undefined): string {
   }
 }
 
-/** Turn the handful of entities that appear in title text back into characters. */
-function decodeHtmlEntities(text: string): string {
-  return text
-    .replace(/&#(\d+);/g, (_, code: string) => String.fromCodePoint(Number(code)))
-    .replace(/&#x([0-9a-f]+);/gi, (_, code: string) => String.fromCodePoint(parseInt(code, 16)))
-    .replace(/&quot;/g, '"')
-    .replace(/&apos;|&#39;/g, "'")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&nbsp;/g, " ")
-    .replace(/&amp;/g, "&")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
 /**
  * Label shown inline at the claim and in the source list.
  *
- * A bare domain cannot distinguish several pages from one host (three `github.com`
- * entries), and a page title is not always usable either: some sites return only their
- * brand, so Reddit reports "Reddit" for every thread. Both cases fall back to
- * `host + readable path`.
+ * The advertised title wins when it names something more specific than the host. Otherwise
+ * the label is the host, with the URL's path when it is not an opaque grounding redirect.
+ * Nothing follows the redirect: the link is only ever opened by the reader.
  */
 export function sourceLabel(source: SearchSource): string {
   // The chunk title is the real host; the raw url can be the opaque redirect host, which
   // must never surface as a label.
-  const host = isBareDomainTitle(source.title)
-    ? source.title.trim()
-    : hostnameOf(source.resolvedUrl ?? source.url);
-  const path = readablePath(source.resolvedUrl) || readablePath(source.url);
-  const hostAndPath = path ? `${host}${path}` : host;
-
-  const pageTitle = source.pageTitle?.trim();
-  if (pageTitle) {
-    const condensed = pageTitle.toLowerCase().replace(/[^a-z0-9]/g, "");
-    const brand = host.replace(/^www\./, "").split(".")[0] ?? "";
-    if (pageTitle.length >= 15 && condensed !== brand) return pageTitle;
-  }
-
+  const host = isBareDomainTitle(source.title) ? source.title.trim() : hostnameOf(source.url);
   if (source.title && !isBareDomainTitle(source.title)) return source.title;
-  return hostAndPath;
+  const path = readablePath(source.url);
+  return path ? `${host}${path}` : host;
 }
-/** True only for the Google grounding redirect host, never a URL that merely mentions it. */
-function isGroundingRedirectUrl(raw: string): boolean {
-  try {
-    const parsed = new URL(raw);
-    const host = parsed.hostname.toLowerCase().replace(/\.$/, "");
-    return (
-      parsed.protocol === "https:" &&
-      (host === GROUNDING_REDIRECT_HOST || host.endsWith(`.${GROUNDING_REDIRECT_HOST}`))
-    );
-  } catch {
-    return false;
-  }
-}
-
-/** Follow one grounding redirect without downloading the target page. */
-async function resolveGroundingRedirect(url: string, signal?: AbortSignal): Promise<string> {
-  if (!isGroundingRedirectUrl(url)) return "";
-  try {
-    const response = await antigravityFetch(url, {
-      redirect: "manual",
-      signal: withDeadline(signal, SOURCE_ENRICH_TIMEOUT_MS),
-    });
-    const location = response.headers.get("location");
-    if (response.status < 300 || response.status >= 400 || !location) return "";
-    const next = new URL(location, url).toString();
-    // Do not return, cache, or later fetch a redirect into loopback or metadata.
-    if (!(await isFetchablePageUrl(next))) return "";
-    return next;
-  } catch {
-    // Caller keeps the original redirect URL.
-  }
-  return "";
-}
-
-/**
- * Read the title out of a response body, stopping at the byte cap.
- *
- * The cap counts bytes, not characters: `String.length` counts UTF-16 code units, so a
- * page in a multi-byte encoding would read well past the intended limit. The slice keeps
- * one oversized chunk from being appended whole before the limit can be checked.
- */
-async function readPageTitle(response: Response): Promise<string> {
-  const body = response.body as ReadableStream<Uint8Array> | null;
-  if (!body) return "";
-  const reader = body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  let bytesRead = 0;
-  try {
-    while (bytesRead < PAGE_TITLE_BYTE_CAP) {
-      const chunk = await reader.read();
-      if (chunk.done) break;
-      const value = chunk.value;
-      if (!value) continue;
-      const remaining = PAGE_TITLE_BYTE_CAP - bytesRead;
-      const slice = value.byteLength > remaining ? value.subarray(0, remaining) : value;
-      bytesRead += slice.byteLength;
-      buffer += decoder.decode(slice, { stream: true });
-      if (/<\/head>/i.test(buffer)) break;
-    }
-  } finally {
-    void reader.cancel().catch(() => {});
-  }
-  const openGraph = buffer.match(
-    /<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)/i,
-  )?.[1];
-  const titleTag = buffer.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1];
-  return decodeHtmlEntities(openGraph || titleTag || "");
-}
-
-/**
- * Read just enough of a page to recover its title; blocked or slow sites return empty.
- *
- * Search results are attacker-influenced input, so this follows no redirect on its own:
- * every hop is checked before it is requested, and the number of hops is capped. A
- * redirect is the ordinary way an innocent-looking URL reaches loopback or a cloud
- * metadata address, and whatever comes back is shown to the model.
- */
-async function fetchPageTitle(url: string, signal?: AbortSignal): Promise<string> {
-  if (!url || url.includes(GROUNDING_REDIRECT_HOST)) return "";
-  // One deadline for the whole chain, so extra hops cannot multiply the wait.
-  const deadline = withDeadline(signal, SOURCE_ENRICH_TIMEOUT_MS);
-  let current = url;
-  for (let hop = 0; hop <= PAGE_TITLE_MAX_HOPS; hop += 1) {
-    if (!(await isFetchablePageUrl(current))) return "";
-    let response: Response;
-    try {
-      response = await antigravityFetch(current, {
-        redirect: "manual",
-        signal: deadline,
-        headers: { "User-Agent": "Mozilla/5.0 (compatible; pi-antigravity/1.0)" },
-      });
-    } catch {
-      return "";
-    }
-    if (response.status >= 300 && response.status < 400) {
-      const location = response.headers.get("location");
-      if (!location) return "";
-      try {
-        current = new URL(location, current).toString();
-      } catch {
-        return "";
-      }
-      continue;
-    }
-    if (!response.ok) return "";
-    const contentType = response.headers.get("content-type") ?? "";
-    if (contentType && !/text\/html|application\/xhtml/i.test(contentType)) return "";
-    return await readPageTitle(response);
-  }
-  return "";
-}
-
-/**
- * Add a real link and a readable label to every source.
- *
- * This exists because `groundingChunks[].web` carries only `uri` and `title`: no snippet,
- * no page title, and a title that is a bare domain almost every time. Without this step
- * a model reading the result cannot tell what any source is. Failures degrade to the
- * bare domain rather than to the opaque redirect URL.
- *
- * `ANTIGRAVITY_NO_SOURCE_ENRICH=1` skips it for callers that would rather not emit one
- * extra request per source.
- */
-async function enrichSources(sources: SearchSource[], signal?: AbortSignal): Promise<void> {
-  if (antigravityEnv("NO_SOURCE_ENRICH") === "1") {
-    for (const source of sources) source.label = sourceLabel(source);
-    return;
-  }
-
-  let cursor = 0;
-  const worker = async (): Promise<void> => {
-    for (;;) {
-      const position = cursor++;
-      if (position >= sources.length) return;
-      const source = sources[position];
-      if (!source) continue;
-
-      const redirect = source.url;
-      if (!isGroundingRedirectUrl(redirect)) {
-        source.resolvedUrl = redirect;
-      } else {
-        const cached = resolvedUrlCache.get(redirect);
-        if (cached !== undefined) {
-          source.resolvedUrl = cached;
-        } else {
-          const resolved = await resolveGroundingRedirect(redirect, signal);
-          if (resolved) {
-            remember(resolvedUrlCache, redirect, resolved);
-            source.resolvedUrl = resolved;
-          }
-        }
-      }
-
-      const target = source.resolvedUrl ?? source.url;
-      const cachedTitle = pageTitleCache.get(target);
-      if (cachedTitle !== undefined) {
-        source.pageTitle = cachedTitle;
-      } else {
-        const title = await fetchPageTitle(target, signal);
-        if (title) {
-          remember(pageTitleCache, target, title);
-          source.pageTitle = title;
-        }
-      }
-
-      source.label = sourceLabel(source);
-    }
-  };
-
-  await Promise.all(
-    Array.from({ length: Math.min(SOURCE_ENRICH_CONCURRENCY, sources.length) }, () => worker()),
-  );
-}
-
 /** Keep a label from breaking out of its link slot or its list line. */
 function escapeLinkText(text: string): string {
   return text.replace(/[[\]]/g, "\\$&").replace(/\s+/g, " ");
@@ -781,7 +399,7 @@ function citeSearchText(res: SearchResult): string {
     bySourceIndex.set(sourceIndex, {
       number: sourceIndex + 1,
       label: sourceLabel(source),
-      url: source.resolvedUrl ?? source.url,
+      url: source.url,
     });
   });
 
@@ -874,7 +492,7 @@ export function formatSearchResult(res: SearchResult): string {
     const list = res.sources
       .map((s, index) => {
         const number = res.supports?.length ? `[${(s.index ?? index) + 1}] ` : "";
-        const url = s.resolvedUrl ?? s.url;
+        const url = s.url;
         return `- ${number}[${escapeLinkText(sourceLabel(s))}](${escapeLinkDestination(url)})`;
       })
       .join("\n");
@@ -890,73 +508,34 @@ export function formatSearchResult(res: SearchResult): string {
 }
 
 /**
- * Execute real-time Google Search grounding via Antigravity backend with automatic fallback.
- *
- * @param options - Execution options containing query, API credentials, and optional directives.
- * @returns Markdown formatted search result with synthesis, citations, and search queries.
+ * Run one grounded search and format the result. agy issues a single request with no
+ * fallback chain, so a failure here is reported rather than retried on another model.
  */
 export async function executeAntigravitySearch(options: ExecuteSearchOptions): Promise<string> {
   const query = options.query.trim();
   if (!query) throw new Error("Search query is required.");
 
   const creds = parseApiKey(options.apiKey);
-  const headers = antigravityHeaders(creds.token);
+  const body = JSON.stringify(buildSearchRequest(options, SEARCH_MODEL, creds.projectId));
+  if (options.signal?.aborted) throw new Error("Search request was aborted");
 
-  let lastError = "no endpoint available";
+  const response = await antigravityTransport.fetch(
+    `${antigravityEndpoint()}/v1internal:generateContent`,
+    {
+      method: "POST",
+      headers: antigravityHeaders(creds.token),
+      body,
+      signal: options.signal,
+    },
+  );
 
-  for (const model of SEARCH_MODEL_FALLBACKS) {
-    const body = JSON.stringify(buildSearchRequest(options, model, creds.projectId));
-
-    for (const endpoint of endpointCandidates()) {
-      if (options.signal?.aborted) throw new Error("Search request was aborted");
-
-      try {
-        const response = await antigravityFetch(`${endpoint}/v1internal:generateContent`, {
-          method: "POST",
-          headers,
-          body,
-          signal: options.signal,
-        });
-
-        if (!response.ok) {
-          lastError = jsonOrTextError(await response.text()).slice(0, 400);
-          const modelRejected =
-            response.status === 400 && /invalid argument|thinking/i.test(lastError);
-          if (
-            response.status === 404 ||
-            modelRejected ||
-            [429, 500, 502, 503, 504].includes(response.status)
-          ) {
-            continue; // Retry next endpoint, or the next fallback model, for model-specific 400s
-          }
-          // Fail fast on non-retryable client errors (e.g. 401 Unauthorized, 403 Forbidden)
-          throw Object.assign(new Error(lastError), { fatal: true });
-        }
-
-        const data: unknown = await response.json();
-        const cand = firstUnknownItem(candidateList(data));
-
-        const candidateText =
-          isRecord(cand) && isRecord(cand.content) && Array.isArray(cand.content.parts)
-            ? (cand.content.parts[0] as { text?: string })?.text
-            : undefined;
-
-        // Skip responses indicating deprecated model and move to next fallback model
-        if (candidateText && candidateText.includes("is no longer available. Please switch")) {
-          lastError = `Model ${model} deprecated: ${candidateText.slice(0, 100)}`;
-          break;
-        }
-
-        const parsed = parseSearchResponse(data);
-        await enrichSources(parsed.sources, options.signal);
-        return formatSearchResult(parsed);
-      } catch (error) {
-        if (options.signal?.aborted) throw error;
-        if (error instanceof Error && (error as { fatal?: boolean }).fatal) throw error;
-        lastError = safeError(error).slice(0, 400);
-      }
-    }
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(describeAntigravityFailure(response.status, detail));
   }
 
-  throw new Error(`Antigravity Google Search failed: ${lastError}`);
+  const data: unknown = await response.json();
+  const parsed = parseSearchResponse(data);
+  for (const source of parsed.sources) source.label = sourceLabel(source);
+  return formatSearchResult(parsed);
 }

@@ -1,9 +1,10 @@
-import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { antigravityTransport } from "../client/transport.js";
 import {
+  antigravityEndpoint,
   antigravityHeaders,
-  endpointCandidates,
   extractProjectId,
   fetchAvailableModelsCatalog,
+  loadCodeAssistResponse,
   parseApiKey,
   resolveProjectId,
 } from "../client/client.js";
@@ -15,7 +16,6 @@ import {
 } from "../diagnostics/diagnostics.js";
 import { isRecord } from "../utils/util.js";
 import { safeError } from "../utils/security.js";
-import { antigravityFetch } from "../utils/http.js";
 import { extractRecommendedModelIds } from "../models/grouping.js";
 import type {
   AccountUsage,
@@ -63,51 +63,39 @@ function formatReset(resetTime?: string): string {
   return `${mins}m`;
 }
 
-function jsonHeaders(token: string): Record<string, string> {
-  return {
-    ...antigravityHeaders(token),
-    Accept: "application/json",
-  };
-}
-
 async function postJson(
   path: string,
   token: string,
   body: Record<string, unknown>,
 ): Promise<{ endpoint: string; status: number; data: unknown }> {
-  let lastErrorText = "";
-  for (const endpoint of endpointCandidates()) {
-    try {
-      const res = await antigravityFetch(`${endpoint}${path}`, {
-        method: "POST",
-        headers: jsonHeaders(token),
-        body: JSON.stringify(body),
-      });
-      setLastEndpoint(endpoint);
-      setLastStatus(res.status);
-      const text = await res.text();
-      let data: unknown;
-      try {
-        data = JSON.parse(text) as unknown;
-      } catch {
-        data = { raw: text } satisfies ApiErrorBody;
-      }
-      if (!res.ok) {
-        const errorBody = isRecord(data) ? (data as ApiErrorBody) : undefined;
-        lastErrorText =
-          typeof errorBody?.error?.message === "string" ? errorBody.error.message : text;
-        if (![403, 404, 429, 500, 502, 503, 504].includes(res.status)) {
-          throw new Error(`${path} failed (${String(res.status)}): ${lastErrorText.slice(0, 300)}`);
-        }
-        continue;
-      }
-      return { endpoint, status: res.status, data };
-    } catch (error) {
-      lastErrorText = safeError(error);
-      setLastError(lastErrorText);
-    }
+  const endpoint = antigravityEndpoint();
+  setLastEndpoint(endpoint);
+  let res: Response;
+  try {
+    res = await antigravityTransport.fetch(`${endpoint}${path}`, {
+      method: "POST",
+      headers: antigravityHeaders(token),
+      body: JSON.stringify(body),
+    });
+  } catch (error) {
+    setLastError(safeError(error));
+    throw error;
   }
-  throw new Error(`${path} failed: ${lastErrorText || "no endpoint available"}`);
+  setLastStatus(res.status);
+  const text = await res.text();
+  let data: unknown;
+  try {
+    data = JSON.parse(text) as unknown;
+  } catch {
+    data = { raw: text } satisfies ApiErrorBody;
+  }
+  if (!res.ok) {
+    const errorBody = isRecord(data) ? (data as ApiErrorBody) : undefined;
+    const message = typeof errorBody?.error?.message === "string" ? errorBody.error.message : text;
+    setLastError(message);
+    throw new Error(`${path} failed (${String(res.status)}): ${message.slice(0, 300)}`);
+  }
+  return { endpoint, status: res.status, data };
 }
 
 function parseQuotaSummary(data: unknown): { groups: QuotaGroup[]; description?: string } {
@@ -198,26 +186,15 @@ function parseTier(value: unknown): TierInfo | undefined {
   };
 }
 
-async function loadCodeAssistSafe(token: string) {
-  try {
-    return await postJson("/v1internal:loadCodeAssist", token, {
-      metadata: {
-        ideType: "ANTIGRAVITY",
-        platform: "PLATFORM_UNSPECIFIED",
-        pluginType: "GEMINI",
-      },
-    });
-  } catch {
-    return null;
-  }
-}
-
 /**
  * The user-quota-summary RPC is gated behind a paid subscription: free-tier
  * accounts get 403 SUBSCRIPTION_REQUIRED (#3501). It is best-effort diagnostics
  * only — never let it block the rest of the account data (models, tier, project).
  */
-async function fetchQuotaSummarySafe(token: string): Promise<
+async function fetchQuotaSummarySafe(
+  token: string,
+  projectId: string,
+): Promise<
   | { ok: true; result: { endpoint: string; status: number; data: unknown } }
   | {
       ok: false;
@@ -225,7 +202,10 @@ async function fetchQuotaSummarySafe(token: string): Promise<
     }
 > {
   try {
-    return { ok: true, result: await postJson("/v1internal:retrieveUserQuotaSummary", token, {}) };
+    return {
+      ok: true,
+      result: await postJson("/v1internal:retrieveUserQuotaSummary", token, { project: projectId }),
+    };
   } catch (error) {
     const msg = safeError(error);
     setLastError(msg);
@@ -245,13 +225,13 @@ export async function fetchAccountUsage(apiKeyRaw?: string): Promise<AccountUsag
   // Fetch loadCodeAssist, quota summary, and available models all in parallel
   // to minimize command execution latency.
   const [assistResult, summaryRes, available] = await Promise.all([
-    loadCodeAssistSafe(creds.token),
-    fetchQuotaSummarySafe(creds.token),
+    loadCodeAssistResponse(creds.token),
+    fetchQuotaSummarySafe(creds.token, initialProjectId),
     fetchAvailableModelsCatalog(creds.token, initialProjectId),
   ]);
 
   // Derive project ID from the loadCodeAssist response or stored project ID.
-  const discoveredProject = assistResult ? extractProjectId(assistResult.data) : undefined;
+  const discoveredProject = extractProjectId(assistResult?.data);
   const projectId = resolveProjectId({
     token: creds.token,
     warmedProject: discoveredProject ?? null,
@@ -366,14 +346,4 @@ export function formatModelsList(usage: AccountUsage, opts?: { all?: boolean }):
   lines.push("");
   lines.push("Note: remaining % is pool-shared (not a private per-model budget).");
   return lines.join("\n");
-}
-
-export async function resolveApiKeyFromContext(
-  ctx: ExtensionCommandContext,
-): Promise<string | undefined> {
-  try {
-    return await ctx.modelRegistry.getApiKeyForProvider("antigravity");
-  } catch {
-    return undefined;
-  }
 }

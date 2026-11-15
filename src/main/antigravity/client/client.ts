@@ -1,4 +1,5 @@
-import { createHash } from "node:crypto";
+import { RELAY_HELP, relayUrl } from "./relay.js";
+import { antigravityTransport } from "./transport.js";
 import {
   getCurrentAvailableModels,
   getCurrentEndpoint,
@@ -9,18 +10,13 @@ import {
   setLastMatchedModelDebug,
   setLastStatus,
 } from "../diagnostics/diagnostics.js";
-import { assertSafeApiBaseUrl, safeError } from "../utils/security.js";
+import { safeError } from "../utils/security.js";
 import type { AntigravityApiKey, AvailableModelsRaw, DynamicModelInfo } from "../types/types.js";
 import { antigravityEnv, asString, isRecord } from "../utils/util.js";
-import { antigravityFetch } from "../utils/http.js";
+import { stableUuid } from "../wire/envelope.js";
 import { registerDiscoveredModelEnums, registerModelEnum } from "../models/models.js";
 
 export const DEFAULT_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com";
-export const ENDPOINT_FALLBACKS = [
-  DEFAULT_ENDPOINT,
-  "https://daily-cloudcode-pa.sandbox.googleapis.com",
-  "https://cloudcode-pa.googleapis.com",
-];
 
 const PROJECT_CACHE_TTL_MS = 30 * 60 * 1000;
 const projectCache = new Map<string, { projectId: string | undefined; expiresAt: number }>();
@@ -37,11 +33,7 @@ const inFlightModelLookups = new Map<string, Promise<DynamicModelInfo | undefine
 
 /** UUID-shaped stable id from a seed (account email preferred over cwd). */
 export function stableProjectId(seed: string): string {
-  const bytes = createHash("sha1").update(`antigravity:${seed}`).digest().subarray(0, 16);
-  bytes[6] = (bytes[6] & 0x0f) | 0x50;
-  bytes[8] = (bytes[8] & 0x3f) | 0x80;
-  const hex = [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  return stableUuid(`antigravity:${seed}`);
 }
 
 /**
@@ -52,30 +44,49 @@ export function defaultProjectId(seed = "antigravity-default"): string {
   return antigravityEnv("PROJECT_ID")?.trim() || stableProjectId(seed);
 }
 
-/** @deprecated Use defaultProjectId(seed); kept for scripts that imported the old constant. */
-export const DEFAULT_PROJECT_ID = defaultProjectId();
-
-export function endpointCandidates(): string[] {
-  const explicit = antigravityEnv("BASE_URL")?.trim();
-  return explicit ? [assertSafeApiBaseUrl(explicit)] : ENDPOINT_FALLBACKS;
+/** Where requests go: the relay, never Google directly. */
+export function antigravityEndpoint(): string {
+  return relayUrl();
 }
 
-// Catalog visibility is gated on this version. 1.2.4 hides Gemini 4 Argon;
-// 1.4.0 is aligned with the current official agy CLI release (#93, #94, #97).
-const DEFAULT_USER_AGENT =
-  "antigravity/cli/1.4.0 (aidev_client; os_type=linux; arch=amd64; cl=982146307; auth_method=consumer)";
+// Catalog visibility is gated on this fingerprint, so it tracks the official agy CLI
+// release. Captured from agy 1.5.9 on darwin/arm64: the version and the changelist
+// both matter, and dropping `cl` hides gemini-pro-orchestrator* from the catalog.
+const CLI_VERSION = "1.5.9";
+
+/** Piper changelist of the agy 1.5.9 build; the native CLI reports its build stamp. */
+const CLI_CHANGELIST = "1021519450";
+
+/** Go spells the host platform as GOOS, which is not Node's `process.platform` on Windows. */
+function runtimeOsType(): string {
+  return process.platform === "win32" ? "windows" : process.platform;
+}
+
+/** Go spells the host architecture as GOARCH (x64 is amd64). */
+function runtimeArch(): string {
+  switch (process.arch) {
+    case "x64":
+      return "amd64";
+    case "ia32":
+      return "386";
+    default:
+      return process.arch;
+  }
+}
 
 /** Default User-Agent matching pure Antigravity CLI wire fingerprint. */
 export function defaultUserAgent(): string {
-  return DEFAULT_USER_AGENT;
+  return `antigravity/cli/${CLI_VERSION} (aidev_client; os_type=${runtimeOsType()}; arch=${runtimeArch()}; cl=${CLI_CHANGELIST}; auth_method=consumer)`;
 }
 
-/** HTTP headers for Antigravity API requests matching CLI wire traffic. */
+// The request-scoped transport removes fetch defaults after these headers are assembled.
+// Insertion order is the wire order and follows agy's HTTP/1.1 requests.
 export function antigravityHeaders(token: string): Record<string, string> {
   return {
+    "User-Agent": antigravityEnv("USER_AGENT") || defaultUserAgent(),
     Authorization: `Bearer ${token}`,
     "Content-Type": "application/json",
-    "User-Agent": antigravityEnv("USER_AGENT") || defaultUserAgent(),
+    "Accept-Encoding": "gzip",
   };
 }
 
@@ -92,18 +103,17 @@ export function jsonOrTextError(text: string): string {
 }
 
 export function parseApiKey(apiKeyRaw: string | undefined): AntigravityApiKey {
-  if (!apiKeyRaw) {
-    throw new Error("No Antigravity OAuth credentials. Run /login antigravity.");
-  }
+  if (!apiKeyRaw) throw new Error(`No relay credentials are available. ${RELAY_HELP}`);
   try {
     const parsed = JSON.parse(apiKeyRaw) as Partial<AntigravityApiKey>;
     if (!parsed.token || !parsed.projectId) throw new Error("missing token or projectId");
-    return { token: parsed.token, projectId: parsed.projectId };
+    return {
+      token: parsed.token,
+      projectId: parsed.projectId,
+      ...(parsed.account ? { account: parsed.account } : {}),
+    };
   } catch (error) {
-    throw new Error(
-      `Invalid Antigravity credentials. Run /login antigravity. (${safeError(error)})`,
-      { cause: error },
-    );
+    throw new Error(`Invalid Antigravity credentials. ${RELAY_HELP}`, { cause: error });
   }
 }
 
@@ -137,23 +147,25 @@ export function extractProjectId(data: unknown): string | undefined {
 }
 
 async function listCloudAICompanionProjects(token: string): Promise<string | undefined> {
-  for (const endpoint of endpointCandidates()) {
-    try {
-      const res = await antigravityFetch(`${endpoint}/v1internal:listCloudAICompanionProjects`, {
+  const endpoint = antigravityEndpoint();
+  try {
+    const res = await antigravityTransport.fetch(
+      `${endpoint}/v1internal:listCloudAICompanionProjects`,
+      {
         method: "POST",
         headers: antigravityHeaders(token),
         body: JSON.stringify({}),
         signal: AbortSignal.timeout(DISCOVERY_TIMEOUT_MS),
-      });
-      setLastStatus(res.status);
-      setLastEndpoint(endpoint);
-      if (!res.ok) continue;
-      return extractProjectId(await res.json());
-    } catch (error) {
-      setLastError(safeError(error));
-    }
+      },
+    );
+    setLastStatus(res.status);
+    setLastEndpoint(endpoint);
+    if (!res.ok) return undefined;
+    return extractProjectId(await res.json());
+  } catch (error) {
+    setLastError(safeError(error));
+    return undefined;
   }
-  return undefined;
 }
 
 function collectModelLabels(value: unknown, out: string[] = []): string[] {
@@ -286,41 +298,28 @@ async function fetchAvailableRuntimeModelUncached(
   projectId: string,
   requestedRuntimeModel: string,
 ): Promise<DynamicModelInfo | undefined> {
-  const body = JSON.stringify({ project: projectId });
-  const endpoints = endpointCandidates();
-  let lastLabels = "";
-
-  // Try endpoints in priority order (production first). If the primary endpoint
-  // resolves the model, return immediately without waiting on slower sandbox endpoints.
-  for (const endpoint of endpoints) {
-    try {
-      const res = await antigravityFetch(`${endpoint}/v1internal:fetchAvailableModels`, {
-        method: "POST",
-        headers: antigravityHeaders(token),
-        body,
-        signal: AbortSignal.timeout(DISCOVERY_TIMEOUT_MS),
-      });
-      setLastStatus(res.status);
-      if (!res.ok) continue;
-      setLastEndpoint(endpoint);
-      const data: unknown = await res.json();
-      if (isRecord(data) && isRecord(data.models)) {
-        registerDiscoveredModelEnums(data.models as Record<string, { model?: unknown }>);
-      }
-      const labels = [...new Set(collectModelLabels(data))].slice(0, 16);
-      if (labels.length) lastLabels = labels.join(",");
-      const found = findDynamicModel(data, requestedRuntimeModel);
-      if (found) {
-        if (lastLabels) setLastAvailableModels(lastLabels);
-        return found;
-      }
-    } catch (error) {
-      setLastError(safeError(error));
+  const endpoint = antigravityEndpoint();
+  try {
+    const res = await antigravityTransport.fetch(`${endpoint}/v1internal:fetchAvailableModels`, {
+      method: "POST",
+      headers: antigravityHeaders(token),
+      body: JSON.stringify({ project: projectId }),
+      signal: AbortSignal.timeout(DISCOVERY_TIMEOUT_MS),
+    });
+    setLastStatus(res.status);
+    setLastEndpoint(endpoint);
+    if (!res.ok) return undefined;
+    const data: unknown = await res.json();
+    if (isRecord(data) && isRecord(data.models)) {
+      registerDiscoveredModelEnums(data.models as Record<string, { model?: unknown }>);
     }
+    const labels = [...new Set(collectModelLabels(data))].slice(0, 16);
+    if (labels.length) setLastAvailableModels(labels.join(","));
+    return findDynamicModel(data, requestedRuntimeModel);
+  } catch (error) {
+    setLastError(safeError(error));
+    return undefined;
   }
-
-  if (lastLabels) setLastAvailableModels(lastLabels);
-  return undefined;
 }
 
 export async function fetchAvailableRuntimeModel(
@@ -358,151 +357,100 @@ export async function fetchAvailableRuntimeModel(
   }
 }
 
-export function clearModelCache(): void {
-  modelCache.clear();
+function catalogSignal(signal?: AbortSignal): AbortSignal {
+  const timeout = AbortSignal.timeout(DISCOVERY_TIMEOUT_MS);
+  return signal ? AbortSignal.any([signal, timeout]) : timeout;
 }
 
-async function fetchAvailableModelsFromEndpoint(
-  endpoint: string,
+export async function fetchAvailableModelsCatalog(
   token: string,
   projectId: string,
   signal?: AbortSignal,
-): Promise<{ endpoint: string; status: number; data: unknown } | undefined> {
+): Promise<{ endpoint: string; status: number; data: AvailableModelsRaw }> {
+  const endpoint = antigravityEndpoint();
+  const res = await antigravityTransport.fetch(`${endpoint}/v1internal:fetchAvailableModels`, {
+    method: "POST",
+    headers: antigravityHeaders(token),
+    body: JSON.stringify({ project: projectId }),
+    signal: catalogSignal(signal),
+  });
+  setLastEndpoint(endpoint);
+  setLastStatus(res.status);
+  const text = await res.text();
+  let parsed: unknown;
   try {
-    const res = await antigravityFetch(`${endpoint}/v1internal:fetchAvailableModels`, {
+    parsed = JSON.parse(text) as unknown;
+  } catch {
+    parsed = { raw: text };
+  }
+  if (!res.ok) {
+    const message =
+      isRecord(parsed) && isRecord(parsed.error) && typeof parsed.error.message === "string"
+        ? parsed.error.message
+        : text;
+    setLastError(message);
+    throw new Error(`/v1internal:fetchAvailableModels failed (${res.status}): ${message}`);
+  }
+  if (
+    !isRecord(parsed) ||
+    !isRecord(parsed.models) ||
+    Object.keys(parsed.models).length === 0 ||
+    !Object.values(parsed.models).every(isRecord)
+  ) {
+    throw new Error("/v1internal:fetchAvailableModels returned an unrecognized catalog");
+  }
+  registerDiscoveredModelEnums(parsed.models as Record<string, { model?: unknown }>);
+  return {
+    endpoint,
+    status: res.status,
+    data: {
+      models: parsed.models as AvailableModelsRaw["models"],
+      defaultAgentModelId:
+        typeof parsed.defaultAgentModelId === "string" ? parsed.defaultAgentModelId : undefined,
+      defaultAgentModel:
+        typeof parsed.defaultAgentModel === "string" ? parsed.defaultAgentModel : undefined,
+      agentModelSorts: Array.isArray(parsed.agentModelSorts)
+        ? (parsed.agentModelSorts as AvailableModelsRaw["agentModelSorts"])
+        : undefined,
+    },
+  };
+}
+
+/** The body agy sends to loadCodeAssist; extra metadata fields would make this request distinguishable. */
+export const LOAD_CODE_ASSIST_BODY = JSON.stringify({ metadata: { ideType: "ANTIGRAVITY" } });
+
+/**
+ * The loadCodeAssist RPC: project id, tier, and quota metadata in one response. Callers
+ * that need the raw body (usage) and callers that only need the project id share it, so
+ * the request shape cannot drift between them.
+ */
+export async function loadCodeAssistResponse(
+  token: string,
+): Promise<{ endpoint: string; status: number; data: unknown } | undefined> {
+  const endpoint = antigravityEndpoint();
+  try {
+    const res = await antigravityTransport.fetch(`${endpoint}/v1internal:loadCodeAssist`, {
       method: "POST",
       headers: antigravityHeaders(token),
-      body: JSON.stringify({ project: projectId }),
-      signal: catalogSignal(signal),
+      body: LOAD_CODE_ASSIST_BODY,
+      signal: AbortSignal.timeout(DISCOVERY_TIMEOUT_MS),
     });
-    const text = await res.text();
-    let data: unknown;
-    try {
-      data = JSON.parse(text) as unknown;
-    } catch {
-      data = { raw: text };
-    }
-    if (!res.ok) {
-      const message =
-        isRecord(data) && isRecord(data.error) && typeof data.error.message === "string"
-          ? data.error.message
-          : text;
-      setLastError(message);
-      return undefined;
-    }
-    return { endpoint, status: res.status, data };
+    setLastStatus(res.status);
+    setLastEndpoint(endpoint);
+    if (!res.ok) return undefined;
+    return { endpoint, status: res.status, data: await res.json() };
   } catch (error) {
     setLastError(safeError(error));
     return undefined;
   }
 }
 
-function catalogSignal(signal?: AbortSignal): AbortSignal {
-  const timeout = AbortSignal.timeout(DISCOVERY_TIMEOUT_MS);
-  return signal ? AbortSignal.any([signal, timeout]) : timeout;
-}
-
-/** Merge catalog payloads from one or more fetchAvailableModels responses. */
-export function mergeAvailableModelsResults(
-  results: Array<{ endpoint: string; status: number; data: unknown } | undefined>,
-): { endpoint: string; status: number; data: AvailableModelsRaw } {
-  const mergedModels: Record<string, unknown> = {};
-  let defaultAgentModelId: string | undefined;
-  let defaultAgentModel: string | undefined;
-  let agentModelSorts: AvailableModelsRaw["agentModelSorts"];
-  let lastEndpoint = "";
-  let lastStatus = 0;
-
-  for (const result of results) {
-    if (
-      !result ||
-      !isRecord(result.data) ||
-      !isRecord(result.data.models) ||
-      Object.keys(result.data.models).length === 0 ||
-      !Object.values(result.data.models).every(isRecord)
-    )
-      continue;
-    setLastEndpoint(result.endpoint);
-    setLastStatus(result.status);
-    lastEndpoint = result.endpoint;
-    lastStatus = result.status;
-    const data = result.data;
-    if (isRecord(data) && isRecord(data.models)) {
-      Object.assign(mergedModels, data.models);
-      registerDiscoveredModelEnums(data.models as Record<string, { model?: unknown }>);
-    }
-    if (isRecord(data) && typeof data.defaultAgentModelId === "string") {
-      defaultAgentModelId = data.defaultAgentModelId;
-    }
-    if (isRecord(data) && typeof data.defaultAgentModel === "string") {
-      defaultAgentModel = data.defaultAgentModel;
-    }
-    if (isRecord(data) && Array.isArray(data.agentModelSorts)) {
-      agentModelSorts = data.agentModelSorts as AvailableModelsRaw["agentModelSorts"];
-    }
-  }
-
-  if (!lastEndpoint) {
-    throw new Error(
-      `/v1internal:fetchAvailableModels failed: no endpoint returned a valid non-empty catalog`,
-    );
-  }
-
-  return {
-    endpoint: lastEndpoint,
-    status: lastStatus,
-    data: {
-      models: mergedModels as AvailableModelsRaw["models"],
-      defaultAgentModelId,
-      defaultAgentModel,
-      agentModelSorts,
-    },
-  };
-}
-
-/**
- * Merge fetchAvailableModels across endpoint candidates so daily/sandbox-only
- * models appear alongside production catalog entries.
- */
-export async function fetchAvailableModelsCatalog(
-  token: string,
-  projectId: string,
-  signal?: AbortSignal,
-): Promise<{ endpoint: string; status: number; data: AvailableModelsRaw }> {
-  const results = await Promise.all(
-    endpointCandidates().map((endpoint) =>
-      fetchAvailableModelsFromEndpoint(endpoint, token, projectId, signal),
-    ),
-  );
-  return mergeAvailableModelsResults(results);
-}
-
-async function loadCodeAssistUncached(token: string): Promise<string | undefined> {
-  const body = JSON.stringify({
-    metadata: {
-      ideType: "ANTIGRAVITY",
-    },
-  });
-
-  for (const endpoint of endpointCandidates()) {
-    try {
-      const res = await antigravityFetch(`${endpoint}/v1internal:loadCodeAssist`, {
-        method: "POST",
-        headers: antigravityHeaders(token),
-        body,
-        signal: AbortSignal.timeout(DISCOVERY_TIMEOUT_MS),
-      });
-      setLastStatus(res.status);
-      setLastEndpoint(endpoint);
-      if (!res.ok) continue;
-      const project = extractProjectId(await res.json());
-      if (project) return project;
-      return await listCloudAICompanionProjects(token);
-    } catch (error) {
-      setLastError(safeError(error));
-    }
-  }
-  return undefined;
+async function loadProjectIdUncached(token: string): Promise<string | undefined> {
+  const response = await loadCodeAssistResponse(token);
+  if (!response) return undefined;
+  const project = extractProjectId(response.data);
+  if (project) return project;
+  return await listCloudAICompanionProjects(token);
 }
 
 /** Discover project id with a short in-memory LRU cache keyed by access token. */
@@ -515,7 +463,7 @@ export async function loadCodeAssist(token: string): Promise<string | undefined>
     return cached.projectId;
   }
 
-  const projectId = await loadCodeAssistUncached(token);
+  const projectId = await loadProjectIdUncached(token);
   projectCache.set(token, { projectId, expiresAt: Date.now() + PROJECT_CACHE_TTL_MS });
 
   // Evict oldest entry when the cache exceeds 32 entries (O(1) — Map preserves insertion order).
@@ -526,21 +474,16 @@ export async function loadCodeAssist(token: string): Promise<string | undefined>
   return projectId;
 }
 
-export function clearProjectCache(): void {
-  projectCache.clear();
-}
-
 export function resolveProjectId(opts: {
   token: string;
   credentialProjectId?: string;
-  email?: string;
   warmedProject?: string | null;
 }): string {
   return (
     antigravityEnv("PROJECT_ID")?.trim() ||
     opts.warmedProject ||
     opts.credentialProjectId ||
-    defaultProjectId(opts.email || "antigravity-default")
+    defaultProjectId()
   );
 }
 

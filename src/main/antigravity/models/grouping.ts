@@ -1,12 +1,9 @@
-import type { ProviderModelConfig } from "@earendil-works/pi-coding-agent";
 import { ThinkingEffort } from "../types/enums.js";
-import type { AntigravityRouting, ModelInfoRaw } from "../types/types.js";
+import type { AntigravityRouting, ChatModelConfig, ModelInfoRaw } from "../types/types.js";
 import { isRecord } from "../utils/util.js";
 
-type ProviderChatModelConfig = Extract<ProviderModelConfig, { reasoning: boolean }>;
-
 export type AntigravityCatalog = {
-  models: ProviderModelConfig[];
+  models: ChatModelConfig[];
   routing: Record<string, AntigravityRouting>;
 };
 
@@ -58,6 +55,13 @@ const PI_LEVELS = [
 
 const ZERO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 
+/**
+ * Families the catalog advertises before its curated `agentModelSorts` lists them.
+ * Without this they would be dropped by the recommendation filter and stay
+ * unselectable until the backend curates them.
+ */
+const ALWAYS_SELECTABLE = /^gemini-4-(?:carbon|hydrogen)-(?:low|medium|high|xhigh)$/;
+
 export function isSelectableRuntimeModelId(id: string, info?: ModelInfoRaw): boolean {
   if (!/^[a-z0-9][a-z0-9_.-]*$/i.test(id) || /^MODEL_/i.test(id)) return false;
   if (/^(chat_|tab_)/i.test(id)) return false;
@@ -103,12 +107,7 @@ export function buildAntigravityCatalog(
     for (const [runtimeId, info] of Object.entries(rawModels)) {
       if (!isSelectableRuntimeModelId(runtimeId, info)) continue;
       if (info?.isInternal) continue;
-      if (
-        filterIds &&
-        !filterIds.has(runtimeId) &&
-        !/^gemini-4-(?:carbon|hydrogen)-(?:low|medium|high|xhigh)$/.test(runtimeId)
-      )
-        continue;
+      if (filterIds && !filterIds.has(runtimeId) && !ALWAYS_SELECTABLE.test(runtimeId)) continue;
 
       const displayName = modelDisplayName(info);
       if (runtimeId.endsWith("-tiered")) {
@@ -140,7 +139,7 @@ export function buildAntigravityCatalog(
 
   if (groups.size === 0) throw new Error("Antigravity catalog contains no supported chat models");
 
-  const models: ProviderModelConfig[] = [];
+  const models: ChatModelConfig[] = [];
   const routing: Record<string, AntigravityRouting> = {};
 
   for (const group of groups.values()) {
@@ -272,8 +271,8 @@ function displayFamily(displayName: string | undefined): string | undefined {
 
 function synthesizeModel(
   group: RuntimeGroup,
-  fallbackModels: ProviderModelConfig[],
-): { model: ProviderModelConfig; routing: AntigravityRouting } {
+  fallbackModels: ChatModelConfig[],
+): { model: ChatModelConfig; routing: AntigravityRouting } {
   const template = familyTemplate(group.publicId, fallbackModels);
   const advertisedLevels = advertisedThinkingLevels(group);
   const routing = routingFromVariants(group.publicId, group.variants, group.unsuffixed);
@@ -374,8 +373,8 @@ function routingFromVariants(
   };
 }
 
-function thinkingLevelMapFromLevels(levels: Set<string>): ProviderChatModelConfig["thinkingLevelMap"] {
-  const map: NonNullable<ProviderChatModelConfig["thinkingLevelMap"]> = {};
+function thinkingLevelMapFromLevels(levels: Set<string>): ChatModelConfig["thinkingLevelMap"] {
+  const map: NonNullable<ChatModelConfig["thinkingLevelMap"]> = {};
   for (const level of PI_LEVELS) {
     map[level] = levels.has(level) ? level : null;
   }
@@ -384,32 +383,28 @@ function thinkingLevelMapFromLevels(levels: Set<string>): ProviderChatModelConfi
 
 function familyTemplate(
   publicId: string,
-  fallbackModels: ProviderModelConfig[],
-): ProviderChatModelConfig | undefined {
-  const findChat = (predicate: (m: ProviderModelConfig) => boolean): ProviderChatModelConfig | undefined => {
-    const found = fallbackModels.find(predicate);
-    return found && !("type" in found && (found as any).type === "image") ? (found as ProviderChatModelConfig) : undefined;
-  };
+  fallbackModels: ChatModelConfig[],
+): ChatModelConfig | undefined {
   if (/^gemini-.*-flash/i.test(publicId)) {
-    return findChat((model) => /^gemini-.*-flash/i.test(model.id));
+    return fallbackModels.find((model) => /^gemini-.*-flash/i.test(model.id));
   }
   if (/^gemini-.*-pro/i.test(publicId)) {
-    return findChat((model) => /^gemini-.*-pro/i.test(model.id));
+    return fallbackModels.find((model) => /^gemini-.*-pro/i.test(model.id));
   }
   if (publicId.startsWith("claude-opus")) {
-    return findChat((model) => model.id.startsWith("claude-opus"));
+    return fallbackModels.find((model) => model.id.startsWith("claude-opus"));
   }
   if (publicId.startsWith("claude-")) {
     return (
-      findChat((model) => model.id.startsWith("claude-sonnet")) ??
-      findChat((model) => model.id.startsWith("claude-"))
+      fallbackModels.find((model) => model.id.startsWith("claude-sonnet")) ??
+      fallbackModels.find((model) => model.id.startsWith("claude-"))
     );
   }
   if (publicId.startsWith("gpt-oss")) {
-    return findChat((model) => model.id.startsWith("gpt-oss"));
+    return fallbackModels.find((model) => model.id.startsWith("gpt-oss"));
   }
   if (publicId.startsWith("gemini-")) {
-    return findChat((model) => model.id.startsWith("gemini-"));
+    return fallbackModels.find((model) => model.id.startsWith("gemini-"));
   }
   return undefined;
 }
@@ -458,7 +453,7 @@ function parseGeminiVersion(id: string): number {
   return Number(match[1]) * 1000 + Number(match[2] || 0);
 }
 
-function comparePublicModels(a: ProviderModelConfig, b: ProviderModelConfig): number {
+function comparePublicModels(a: ChatModelConfig, b: ChatModelConfig): number {
   const rankA = modelRank(a.id);
   const rankB = modelRank(b.id);
   if (rankA[0] !== rankB[0]) return rankA[0] - rankB[0];

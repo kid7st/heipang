@@ -1,43 +1,28 @@
-import { antigravityEnv, isRecord } from "./util.js";
+import { isRecord } from "./util.js";
 
-const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "localhost"]);
-const ALLOWED_API_HOST_SUFFIXES = [".googleapis.com", ".sandbox.googleapis.com"];
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 
-/** Only loopback binds are allowed so OAuth codes cannot be stolen off-machine. */
-export function resolveCallbackHost(raw = antigravityEnv("CALLBACK_HOST")): string {
-  const host = (raw || "127.0.0.1").trim().toLowerCase();
-  if (!LOOPBACK_HOSTS.has(host)) {
-    throw new Error(
-      `Unsafe ANTIGRAVITY_CALLBACK_HOST="${host}". Only loopback hosts are allowed: 127.0.0.1, ::1, localhost.`,
-    );
-  }
-  return host === "localhost" ? "127.0.0.1" : host;
-}
-
-/** Prevent token exfiltration via poisoned BASE_URL (SSRF / credential leak). */
-export function assertSafeApiBaseUrl(raw: string): string {
+/** The relay receives every request and the relay key, so it must be a plain https origin (or loopback). */
+export function assertSafeRelayUrl(raw: string): string {
   let url: URL;
   try {
     url = new URL(raw);
   } catch {
-    throw new Error(`Invalid ANTIGRAVITY_BASE_URL: ${raw}`);
+    throw new Error(`Invalid ANTIGRAVITY_RELAY_URL: ${raw}`);
   }
-  if (url.protocol !== "https:") {
-    throw new Error(`ANTIGRAVITY_BASE_URL must use https (got ${url.protocol})`);
+  if (
+    url.protocol !== "https:" &&
+    !(url.protocol === "http:" && LOOPBACK_HOSTS.has(url.hostname))
+  ) {
+    throw new Error(`ANTIGRAVITY_RELAY_URL must use https (got ${url.protocol})`);
   }
   if (url.username || url.password) {
-    throw new Error("ANTIGRAVITY_BASE_URL must not include credentials");
+    throw new Error("ANTIGRAVITY_RELAY_URL must not include credentials");
   }
-  const host = url.hostname.toLowerCase();
-  const allowed =
-    host === "googleapis.com" || ALLOWED_API_HOST_SUFFIXES.some((suffix) => host.endsWith(suffix));
-  if (!allowed) {
-    throw new Error(
-      `ANTIGRAVITY_BASE_URL host "${host}" is not allowed. Use a *.googleapis.com endpoint.`,
-    );
+  if ((url.pathname !== "/" && url.pathname !== "") || url.search || url.hash) {
+    throw new Error("ANTIGRAVITY_RELAY_URL must be an origin only, like https://relay.example.com");
   }
-  const path = url.pathname.replace(/\/+$/, "");
-  return `${url.origin}${path === "/" ? "" : path}`;
+  return url.origin;
 }
 
 /** Redact bearer tokens, refresh tokens, and similar secrets from diagnostics/errors. */

@@ -1,3 +1,6 @@
+import { antigravityTransport } from "../client/transport.js";
+import { writeFile } from "node:fs/promises";
+import { isDeepStrictEqual } from "node:util";
 import {
   calculateCost,
   createAssistantMessageEventStream,
@@ -12,18 +15,18 @@ import {
 } from "@earendil-works/pi-ai";
 // Namespace import: transcript helpers exist on pi-ai >= 0.86; resolved at runtime.
 import * as piAi from "@earendil-works/pi-ai";
-import { failoverToNextAccount } from "../auth/accounts.js";
 import {
+  antigravityEndpoint,
   antigravityHeaders,
-  endpointCandidates,
   fetchAvailableRuntimeModel,
   formatRequestDiagnostics,
   isUsableRuntimeModelId,
-  jsonOrTextError,
   loadCodeAssist,
   parseApiKey,
   resolveProjectId,
 } from "../client/client.js";
+import { renameHarness } from "../wire/system-prompt.js";
+import { registerTrajectory } from "../client/trajectory.js";
 import {
   getCurrentAvailableModels,
   getCurrentEndpoint,
@@ -52,10 +55,10 @@ import {
   getMaxOutputTokens,
   getAntigravityRequestModelId,
   getFallbackRuntimeModel,
-  getThinkingConfig,
   PROVIDER_ID,
 } from "../models/models.js";
-import { extractValidationUrl, redactSecrets, safeError } from "../utils/security.js";
+import { safeError } from "../utils/security.js";
+import { classifyAntigravityFailure, renderAntigravityFailure } from "../wire/failure.js";
 import {
   ANTIGRAVITY_API,
   type ActiveBlock,
@@ -72,20 +75,17 @@ import {
   type GeminiTextPart,
   type StreamChunk,
 } from "../types/types.js";
+import { antigravityEnv, isRecord, sanitizeText } from "../utils/util.js";
 import {
-  antigravityEnv,
-  antigravityRequestEnvelope,
-  isRecord,
-  resolveSessionTrajectory,
-  sanitizeText,
-} from "../utils/util.js";
-import { antigravityFetch, prewarmConnection } from "../utils/http.js";
+  agentRequestEnvelope,
+  familyProfile,
+  toInt64SessionId,
+  thinkingWire,
+  type AntigravityEnvelopeOptions,
+} from "../wire/index.js";
+import { nextRequestState, type AntigravityAssistantMessage } from "../wire/session.js";
 
 export { ANTIGRAVITY_API };
-
-const ANTIGRAVITY_SYSTEM_INSTRUCTION =
-  "You are Antigravity, a powerful agentic AI coding assistant designed by Google DeepMind. " +
-  "You are pair programming with a user to solve coding tasks. Be concise, practical, and tool-aware.";
 
 const ANTIGRAVITY_NO_PREAMBLE_INSTRUCTION =
   'CRITICAL: NEVER output rule checks, formatting guidelines, constraint checklists (e.g. "No emdashes"), or your thinking/personality preambles in the final response. Output only the final response.';
@@ -99,110 +99,27 @@ function sanitizeToolCallId(id: string, fallbackName?: string): string {
   return capped || `${fallbackName || "tool"}_${++toolCallCounter}`;
 }
 
-function toolCallIdNeeded(modelId: string, runtimeModel: string): boolean {
-  return (
-    modelId.startsWith("claude-") ||
-    modelId.startsWith("gpt-oss-") ||
-    runtimeModel.startsWith("claude-") ||
-    runtimeModel.startsWith("gpt-oss-")
-  );
-}
-
-interface SystemMessageLike {
-  role?: string;
-  content?: string | Array<{ type?: string; text?: string }>;
-  sections?: Record<string, unknown>;
-  toolsAdded?: Tool[];
-  toolsRemoved?: Array<{ name: string }>;
-  tools?: Tool[];
-}
-
-interface PiAiTranscriptModule {
-  getCurrentTools?: (messages: Context["messages"]) => Tool[];
+type TranscriptHelpers = {
   getCurrentSystemPrompt?: (messages: Context["messages"]) => string;
-}
+  getCurrentTools?: (messages: Context["messages"]) => Tool[];
+};
 
-function transcriptModule(): PiAiTranscriptModule {
-  return piAi;
-}
-
-function asSystemMessages(messages: Context["messages"] | undefined): SystemMessageLike[] {
-  return [...(messages ?? [])] as SystemMessageLike[];
-}
-
-function extractTranscriptSystemPrompt(messages: readonly SystemMessageLike[]): string {
-  const parts: string[] = [];
-  for (const message of messages) {
-    if (message?.role !== "system") continue;
-    if (message.sections && typeof message.sections === "object") {
-      const sectionParts = Object.values(message.sections).filter(
-        (value): value is string => typeof value === "string" && value.trim().length > 0,
-      );
-      if (sectionParts.length > 0) {
-        parts.push(sectionParts.join("\n\n"));
-        continue;
-      }
-    }
-    if (typeof message.content === "string" && message.content.trim()) {
-      parts.push(message.content);
-    } else if (Array.isArray(message.content)) {
-      const texts = message.content
-        .map((block) => (typeof block === "string" ? block : block?.text || ""))
-        .filter((text) => text.trim().length > 0);
-      if (texts.length > 0) parts.push(texts.join("\n\n"));
-    }
-  }
-  return parts.join("\n\n");
-}
-
-function extractTranscriptTools(messages: readonly SystemMessageLike[]): Tool[] {
-  const tools = new Map<string, Tool>();
-  for (const message of messages) {
-    if (message?.role !== "system") continue;
-    for (const tool of message.toolsRemoved ?? []) {
-      tools.delete(tool.name);
-    }
-    for (const tool of [...(message.toolsAdded ?? []), ...(message.tools ?? [])]) {
-      if (tool && typeof tool.name === "string") tools.set(tool.name, tool);
-    }
-  }
-  return [...tools.values()];
-}
+const transcriptHelpers = piAi as unknown as TranscriptHelpers;
 
 /**
- * pi >= 0.86 hands providers a normalized TranscriptContext: the system prompt and
- * tool declarations live in system messages and must be read with
- * `getCurrentSystemPrompt()` / `getCurrentTools()`. Older releases still pass the
- * flat Context fields. Resolve both so requests are not sent without tools.
+ * pi >= 0.86 hands providers a normalized transcript: the system prompt and tool
+ * declarations live in system messages and are read with `getCurrentSystemPrompt()` /
+ * `getCurrentTools()`. Older releases pass the flat Context fields instead, so both are
+ * consulted and Pi owns the transcript replay.
  */
-export function resolveCurrentSystemPrompt(context: Context): string | undefined {
-  const helper = transcriptModule().getCurrentSystemPrompt;
-  if (typeof helper === "function") {
-    try {
-      const fromHelper = helper(context.messages ?? []);
-      if (fromHelper?.trim()) return fromHelper;
-    } catch {
-      // Fall through to local replay / legacy fields.
-    }
-  }
-  const fromTranscript = extractTranscriptSystemPrompt(asSystemMessages(context.messages));
-  if (fromTranscript.trim()) return fromTranscript;
-  return context.systemPrompt;
+function resolveCurrentSystemPrompt(context: Context): string | undefined {
+  const fromTranscript = transcriptHelpers.getCurrentSystemPrompt?.(context.messages ?? []);
+  return fromTranscript?.trim() ? fromTranscript : context.systemPrompt;
 }
 
-export function resolveCurrentTools(context: Context): Tool[] | undefined {
-  const helper = transcriptModule().getCurrentTools;
-  if (typeof helper === "function") {
-    try {
-      const fromHelper = helper(context.messages ?? []);
-      if (fromHelper.length > 0) return fromHelper;
-    } catch {
-      // Fall through to local replay / legacy fields.
-    }
-  }
-  const fromTranscript = extractTranscriptTools(asSystemMessages(context.messages));
-  if (fromTranscript.length > 0) return fromTranscript;
-  return context.tools;
+function resolveCurrentTools(context: Context): Tool[] | undefined {
+  const fromTranscript = transcriptHelpers.getCurrentTools?.(context.messages ?? []);
+  return fromTranscript?.length ? fromTranscript : context.tools;
 }
 
 const base64SignaturePattern = /^[A-Za-z0-9+/]+={0,2}$/;
@@ -210,16 +127,6 @@ function isValidThoughtSignature(signature?: string): boolean {
   if (!signature || typeof signature !== "string" || signature.length === 0) return false;
   if (signature.length % 4 !== 0) return false;
   return base64SignaturePattern.test(signature);
-}
-
-function geminiRequiresThoughtSignature(runtimeModel: string): boolean {
-  if (!runtimeModel.startsWith("gemini-")) return false;
-  const match = runtimeModel.match(/^gemini-(\d+)/);
-  if (match) {
-    const major = Number.parseInt(match[1], 10);
-    return major >= 3;
-  }
-  return true;
 }
 
 function parseImageData(raw: string, explicitMime?: string): { data: string; mimeType: string } {
@@ -256,6 +163,15 @@ function withoutSkillBlocks(text: string): string {
   return text.replace(SKILL_BLOCK_PATTERN, "");
 }
 
+function imagePartOf(block: ContentBlock): GeminiInlineDataPart[] {
+  if (block.type !== "image") return [];
+  const rawData = block.data || block.source?.data;
+  if (!rawData) return [];
+  const explicitMime = block.mimeType || block.mediaType || block.source?.mediaType;
+  const { data, mimeType } = parseImageData(rawData, explicitMime);
+  return data ? [{ inlineData: { mimeType, data } }] : [];
+}
+
 function asTextParts(content: unknown): Array<GeminiTextPart | GeminiInlineDataPart> {
   const textPart = (text: string): GeminiTextPart[] => {
     const userText = withoutSkillBlocks(text);
@@ -266,38 +182,24 @@ function asTextParts(content: unknown): Array<GeminiTextPart | GeminiInlineDataP
   return content.flatMap((item): Array<GeminiTextPart | GeminiInlineDataPart> => {
     if (!isRecord(item)) return [];
     const block = item as ContentBlock;
-    if (block.type === "text") return textPart(block.text);
-    if (block.type === "image") {
-      const rawData = block.data || block.source?.data;
-      if (!rawData) return [];
-      const explicitMime = block.mimeType || block.mediaType || block.source?.mediaType;
-      const { data, mimeType } = parseImageData(rawData, explicitMime);
-      return data ? [{ inlineData: { mimeType, data } }] : [];
-    }
-    return [];
+    return block.type === "text" ? textPart(block.text) : imagePartOf(block);
   });
 }
 
 function asImageParts(content: unknown): GeminiInlineDataPart[] {
   if (!Array.isArray(content)) return [];
-  return content.flatMap((item): GeminiInlineDataPart[] => {
-    if (!isRecord(item)) return [];
-    const block = item as ContentBlock;
-    if (block.type === "image") {
-      const rawData = block.data || block.source?.data;
-      if (!rawData) return [];
-      const explicitMime = block.mimeType || block.mediaType || block.source?.mediaType;
-      const { data, mimeType } = parseImageData(rawData, explicitMime);
-      return data ? [{ inlineData: { mimeType, data } }] : [];
-    }
-    return [];
-  });
+  return content.flatMap((item) => (isRecord(item) ? imagePartOf(item as ContentBlock) : []));
 }
 
 function appendTurn(contents: GeminiContent[], role: GeminiRole, parts: GeminiPart[]): void {
   if (!parts.length) return;
   const last = contents[contents.length - 1];
-  if (last && last.role === role) {
+  if (
+    last &&
+    last.role === role &&
+    last.parts.some((part) => "functionResponse" in part) ===
+      parts.some((part) => "functionResponse" in part)
+  ) {
     last.parts.push(...parts);
   } else {
     contents.push({ role, parts });
@@ -311,7 +213,8 @@ export function convertMessages(
   runtimeModel: string,
 ): GeminiContent[] {
   const contents: GeminiContent[] = [];
-  const requiresSig = geminiRequiresThoughtSignature(runtimeModel);
+  const profile = familyProfile(model.id, runtimeModel);
+  const requiresSig = profile.requiresThoughtSignature;
   const droppedToolCallIds = new Map<string, string>();
   for (const msg of context.messages) {
     if ((msg.role as string) === "system") continue;
@@ -371,11 +274,9 @@ export function convertMessages(
           } else {
             parts.push({
               functionCall: {
+                id: sanitizeToolCallId(block.id || "", block.name),
                 name: block.name,
-                args: block.arguments ?? {},
-                ...(toolCallIdNeeded(model.id, runtimeModel)
-                  ? { id: sanitizeToolCallId(block.id || "", block.name) }
-                  : {}),
+                args: sortKeysDeep(block.arguments ?? {}) as Record<string, unknown>,
               },
               ...(block.thoughtSignature ? { thoughtSignature: block.thoughtSignature } : {}),
             });
@@ -391,9 +292,7 @@ export function convertMessages(
       const responseText = text || (msg.isError ? "Tool failed" : "");
       const imageParts = asImageParts(msg.content);
       const rawId = msg.toolCallId || "";
-      const sanitizedId = toolCallIdNeeded(model.id, runtimeModel)
-        ? sanitizeToolCallId(rawId, msg.toolName)
-        : rawId;
+      const sanitizedId = sanitizeToolCallId(rawId, msg.toolName);
       const droppedArgs = requiresSig
         ? (droppedToolCallIds.get(rawId) ??
           droppedToolCallIds.get(sanitizedId) ??
@@ -409,27 +308,27 @@ export function convertMessages(
       } else {
         const part: GeminiFunctionResponsePart = {
           functionResponse: {
+            id: sanitizedId,
             name: msg.toolName,
             response: msg.isError ? { error: responseText } : { output: responseText },
-            ...(toolCallIdNeeded(model.id, runtimeModel)
-              ? { id: sanitizeToolCallId(msg.toolCallId || "", msg.toolName) }
-              : {}),
           },
         };
-        appendTurn(contents, GeminiRole.User, [part, ...imageParts]);
+        appendTurn(contents, profile.isNonGemini ? GeminiRole.User : GeminiRole.Model, [
+          part,
+          ...imageParts,
+        ]);
       }
     }
   }
 
-  // A function-call model turn is only valid immediately after a user turn
-  // (including a function-response turn). Compacted history can drop that
-  // boundary, so restore it before applying the natural-language bridge.
+  // Compaction can remove the user/tool-result boundary required before a function call.
   for (let index = 0; index < contents.length; index += 1) {
     const turn = contents[index];
     if (
       turn?.role === GeminiRole.Model &&
       turn.parts.some((part) => "functionCall" in part) &&
-      contents[index - 1]?.role !== GeminiRole.User
+      contents[index - 1]?.role !== GeminiRole.User &&
+      !contents[index - 1]?.parts.some((part) => "functionResponse" in part)
     ) {
       contents.splice(index, 0, {
         role: GeminiRole.User,
@@ -458,7 +357,10 @@ export function convertMessages(
   }
 
   const lastTurn = contents.at(-1);
-  if (lastTurn?.role === GeminiRole.Model) {
+  if (
+    lastTurn?.role === GeminiRole.Model &&
+    !lastTurn.parts.some((part) => "functionResponse" in part)
+  ) {
     if (lastTurn.parts.some((part) => "functionCall" in part)) {
       throw new Error(
         "Antigravity request is missing tool result(s) for the final assistant tool call. Provide the corresponding tool result before continuing.",
@@ -778,6 +680,9 @@ function stripMetaSchema(schema: unknown): unknown {
  * Allowlist rather than denylist so new JSON Schema keywords cannot 400 the request.
  * Pi still validates tool args after the model calls them.
  */
+// agy sends exactly these keywords in the `parameters` of every model family, Claude and GPT-OSS
+// included (captured with claude-sonnet-5-5 and gpt-oss-120b). A tool that uses them stays on
+// `parameters` instead of falling back to `parametersJsonSchema`, a field agy never sends.
 const CUSTOM_TOOL_SCHEMA_ALLOW = new Set([
   "type",
   "description",
@@ -785,6 +690,9 @@ const CUSTOM_TOOL_SCHEMA_ALLOW = new Set([
   "required",
   "items",
   "enum",
+  "minimum",
+  "minLength",
+  "minItems",
 ]);
 
 function normalizeCustomToolType(value: unknown): unknown {
@@ -832,13 +740,65 @@ function normalizeCustomToolSchema(schema: unknown): unknown {
 }
 
 /**
- * Gemini accepts JSON Schema through parametersJsonSchema. Claude and GPT-OSS
- * use Cloud Code Assist's custom-tool bridge, which requires a compatible
- * Draft 2020-12 subset in the legacy parameters field.
+ * agy builds a tool call's arguments from a Go map, which writes its keys sorted. A model's
+ * arguments arrive in the order it produced them.
  */
+export function sortKeysDeep(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortKeysDeep);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .map(([key, entry]) => [key, sortKeysDeep(entry)]),
+  );
+}
+
+// agy writes schemas from Go: keywords in struct order, `properties` in map (alphabetical) order.
+// This is the order of every schema in a captured agy 1.5.9 request. Keywords it never sent keep
+// their relative order after the known ones.
+const SCHEMA_KEY_ORDER = [
+  "type",
+  "description",
+  "enum",
+  "format",
+  "items",
+  "minItems",
+  "maxItems",
+  "minLength",
+  "maxLength",
+  "minimum",
+  "maximum",
+  "properties",
+  "required",
+];
+
+function schemaKeyRank(key: string): number {
+  const index = SCHEMA_KEY_ORDER.indexOf(key);
+  return index < 0 ? SCHEMA_KEY_ORDER.length : index;
+}
+
+/** Exported for unit tests. */
+export function orderSchema(schema: unknown): unknown {
+  if (Array.isArray(schema)) return schema.map(orderSchema);
+  if (!schema || typeof schema !== "object") return schema;
+  const entries = Object.entries(schema).sort(([a], [b]) => schemaKeyRank(a) - schemaKeyRank(b));
+  return Object.fromEntries(
+    entries.map(([key, value]) => {
+      if (key === "properties" && value && typeof value === "object" && !Array.isArray(value)) {
+        const properties = Object.entries(value as Record<string, unknown>)
+          .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+          .map(([name, property]) => [name, orderSchema(property)]);
+        return [key, Object.fromEntries(properties)];
+      }
+      return [key, orderSchema(value)];
+    }),
+  );
+}
+
+// Prefer agy's protobuf schema dialect; Gemini's JSON Schema field preserves richer constraints.
 export function convertTools(
   tools: Tool[] | undefined,
-  useLegacyParameters = false,
+  customBackend = false,
 ): { functionDeclarations: GeminiFunctionDeclaration[] }[] | undefined {
   if (!tools?.length) return undefined;
 
@@ -855,12 +815,21 @@ export function convertTools(
 
     const rootObject = ensureRootObjectSchema(dereferenced.schema);
     const schema = stripMetaSchema(rootObject);
+    const parameters = normalizeCustomToolSchema(schema);
+    const lossless = isDeepStrictEqual(parameters, schema);
+    if (!lossless) {
+      warnings.push(
+        customBackend
+          ? `Tool '${tool.name}' uses a reduced backend schema; Pi retains the original argument validation.`
+          : `Tool '${tool.name}' uses parametersJsonSchema to preserve constraints unsupported by parameters.`,
+      );
+    }
     return [
       {
         name: tool.name,
         description: tool.description,
-        ...(useLegacyParameters
-          ? { parameters: normalizeCustomToolSchema(schema) }
+        ...(customBackend || lossless
+          ? { parameters: orderSchema(parameters) }
           : { parametersJsonSchema: schema }),
       },
     ];
@@ -868,7 +837,7 @@ export function convertTools(
 
   setLastToolSchemaWarnings(warnings.length ? warnings : undefined);
   if (!functionDeclarations.length) return undefined;
-  return [{ functionDeclarations }];
+  return functionDeclarations.map((declaration) => ({ functionDeclarations: [declaration] }));
 }
 
 function mapToolChoiceMode(
@@ -880,6 +849,14 @@ function mapToolChoiceMode(
   return GeminiToolCallingMode.Auto;
 }
 
+/** The text of the conversation's first user message, which agy titles the conversation from. */
+function firstUserMessage(context: Context): string | undefined {
+  const first = context.messages.find((message) => message.role === "user");
+  if (!first) return undefined;
+  if (typeof first.content === "string") return first.content;
+  return first.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n");
+}
+
 /** Exported for unit tests. */
 export function buildRequest(
   model: Model<Api>,
@@ -887,6 +864,7 @@ export function buildRequest(
   projectId: string,
   options: AntigravityStreamOptions,
   runtimeModel: string,
+  requestState?: AntigravityEnvelopeOptions,
 ): AntigravityGenerateRequest {
   const injectedSkills = context.messages.flatMap((msg) =>
     msg.role === "user" ? skillBlocks(msg.content) : [],
@@ -894,99 +872,64 @@ export function buildRequest(
   const systemPromptText = resolveCurrentSystemPrompt(context);
   const declaredTools = resolveCurrentTools(context);
   const systemParts = systemPromptText
-    ? [{ text: sanitizeText(systemPromptText) }]
-    : [{ text: ANTIGRAVITY_SYSTEM_INSTRUCTION }, { text: ANTIGRAVITY_NO_PREAMBLE_INSTRUCTION }];
-  systemParts.push(...injectedSkills.map((skill) => ({ text: sanitizeText(skill) })));
+    ? [{ text: renameHarness(sanitizeText(systemPromptText)) }]
+    : [{ text: ANTIGRAVITY_NO_PREAMBLE_INSTRUCTION }];
+  systemParts.push(
+    ...injectedSkills.map((skill) => ({ text: renameHarness(sanitizeText(skill)) })),
+  );
 
   const contents = convertMessages(model, context, runtimeModel);
-  const hasUserText = contents.some(
-    (turn) =>
-      turn.role === GeminiRole.User &&
-      turn.parts.some((part) => "text" in part && Boolean(part.text.trim())),
-  );
-  if (!hasUserText && (injectedSkills.length > 0 || Boolean(systemPromptText))) {
+  // convertMessages guarantees a user text part whenever the transcript has any turn,
+  // so an empty list is the only case left that needs the instructions as a prompt.
+  if (contents.length === 0 && (injectedSkills.length > 0 || Boolean(systemPromptText))) {
     contents.unshift({
       role: GeminiRole.User,
       parts: [{ text: "Apply the active system instructions." }],
     });
   }
 
+  const generationConfig: GeminiGenerationConfig = {};
+  const maxAllowed = getMaxOutputTokens(model.id, runtimeModel);
+  generationConfig.maxOutputTokens =
+    options.maxTokens !== undefined
+      ? Math.min(options.maxTokens, maxAllowed)
+      : Math.min(maxAllowed, model.maxTokens || maxAllowed);
+  if (options.temperature !== undefined) generationConfig.temperature = options.temperature;
+  const thinking = thinkingWire(runtimeModel, options.reasoning ?? "off");
+  if (thinking) generationConfig.thinkingConfig = thinking;
+
+  const profile = familyProfile(model.id, runtimeModel);
+  const tools = convertTools(declaredTools, profile.family !== "gemini");
+  const envelope = agentRequestEnvelope(runtimeModel, {
+    isClaude: profile.isClaude,
+    isNonGemini: profile.isNonGemini,
+    sessionId: toInt64SessionId(options.sessionId),
+    ...requestState,
+  });
+
+  // Key order is agy's, captured from a real 1.5.9 request: Go writes structs in field order.
   const request: GeminiRequestBody = {
     contents,
     systemInstruction: {
       role: GeminiRole.User,
       parts: systemParts,
     },
+    ...(tools ? { tools } : {}),
+    ...(options.toolChoice && options.toolChoice !== ToolChoice.Auto
+      ? { toolConfig: { functionCallingConfig: { mode: mapToolChoiceMode(options.toolChoice) } } }
+      : {}),
+    labels: envelope.labels,
+    generationConfig,
+    sessionId: envelope.sessionId,
   };
-
-  const generationConfig: GeminiGenerationConfig = {};
-  if (options.temperature !== undefined) generationConfig.temperature = options.temperature;
-  const thinking = getThinkingConfig(runtimeModel, options.reasoning ?? "off");
-  if (thinking) generationConfig.thinkingConfig = thinking;
-  const maxAllowed = getMaxOutputTokens(model.id, runtimeModel);
-  if (options.maxTokens !== undefined) {
-    generationConfig.maxOutputTokens = Math.min(options.maxTokens, maxAllowed);
-  } else {
-    generationConfig.maxOutputTokens = Math.min(maxAllowed, model.maxTokens || maxAllowed);
-  }
-  if (Object.keys(generationConfig).length) request.generationConfig = generationConfig;
-
-  const isClaude = model.id.startsWith("claude-") || runtimeModel.startsWith("claude-");
-  const tools = convertTools(declaredTools, isClaude || model.id.startsWith("gpt-oss-"));
-  if (tools) {
-    request.tools = tools;
-  }
-  if (options.toolChoice && options.toolChoice !== ToolChoice.Auto) {
-    request.toolConfig = {
-      functionCallingConfig: {
-        mode: mapToolChoiceMode(options.toolChoice),
-      },
-    };
-  }
-
-  const isNonGemini =
-    isClaude ||
-    model.id.startsWith("gpt-oss-") ||
-    runtimeModel.startsWith("gpt-oss-") ||
-    (!model.id.startsWith("gemini-") && !runtimeModel.startsWith("gemini-"));
-
-  // Pure agy CLI wire alignment:
-  // - step in requestId (.../<step>) equals contents.length (total content blocks)
-  // - last_step_index is 0-based index of the last content block (contents.length - 1)
-  // - request_id is ${trajectoryId}-${requestIndex} (0-based HTTP request sequence counter)
-  //   In multi-turn agent loops (with tools), every completed assistant response increments the request counter.
-  const step = Math.max(1, request.contents.length);
-  const lastStepIndex = String(Math.max(0, request.contents.length - 1));
-  const requestIndex =
-    context.messages?.filter(
-      (m) => m.role === "assistant" && m.stopReason !== "error" && m.stopReason !== "aborted",
-    ).length ?? 0;
-
-  const { conversationId, trajectoryId, sessionId } = resolveSessionTrajectory(
-    context,
-    options.sessionId,
-  );
-
-  const envelope = antigravityRequestEnvelope(runtimeModel, {
-    isClaude,
-    isNonGemini,
-    step,
-    lastStepIndex,
-    requestIndex,
-    conversationId,
-    trajectoryId,
-    sessionId,
-  });
-  request.sessionId = envelope.sessionId;
-  request.labels = envelope.labels;
 
   return {
     project: projectId,
-    model: runtimeModel,
-    request,
-    requestType: AntigravityRequestType.Agent,
-    userAgent: AntigravityUserAgent.Antigravity,
     requestId: envelope.requestId,
+    request,
+    model: runtimeModel,
+    userAgent: AntigravityUserAgent.Antigravity,
+    requestType: AntigravityRequestType.Agent,
   };
 }
 
@@ -997,27 +940,43 @@ export function mapStopReason(reason: string | undefined): StopReason {
   return reason ? StopReason.Error : StopReason.Stop;
 }
 
-/** Account quota walls. These must stay non-retryable and may fail over to another login. */
-function isAccountQuota429(text: string): boolean {
-  return (
-    /Individual quota reached/i.test(text) ||
-    /Resets? in /i.test(text) ||
-    (!/rate.?limit/i.test(text) && /quota exceeded|exceeded your|daily limit/i.test(text))
-  );
-}
-
-/** Short throttles. Pi retries these; persistent model unavailability must not match. */
-function isRetryableRateLimit(text: string): boolean {
-  return /rate.?limit|too many requests/i.test(text);
-}
+const DEBUG_DUMP_PATH = "/tmp/antigravity-last-request.json";
 
 /**
- * Keep the numeric status out of non-retryable errors. Pi treats the digits 429 as a
- * retryable provider error even when the friendly text says the model is unavailable.
+ * ANTIGRAVITY_DEBUG_DUMP=1 saves the payload of a rejected request so a wire change
+ * can be compared against agy. The body contains the conversation, so it is opt-in
+ * and always written to a fixed path.
  */
-function publicErrorStatus(status: number | undefined, friendly: string): string {
-  if (status === undefined) return "no response";
-  return /retrying automatically/i.test(friendly) ? String(status) : "request-failed";
+async function dumpFailedRequest(detail: {
+  status?: number;
+  runtimeModel: string;
+  body: string | undefined;
+  errorText: string;
+}): Promise<void> {
+  if (antigravityEnv("DEBUG_DUMP") !== "1" || !detail.body) return;
+  let parsedBody: unknown = detail.body;
+  try {
+    parsedBody = JSON.parse(detail.body);
+  } catch {
+    // Not JSON: keep the raw string in the dump.
+  }
+  try {
+    await writeFile(
+      DEBUG_DUMP_PATH,
+      JSON.stringify(
+        {
+          status: detail.status,
+          runtimeModel: detail.runtimeModel,
+          errorText: detail.errorText.slice(0, 4000),
+          body: parsedBody,
+        },
+        null,
+        2,
+      ),
+    );
+  } catch (error) {
+    setLastError(`debug dump failed: ${safeError(error)}`);
+  }
 }
 
 /** Record a static route so doctor output is not matched=none on models that skip discovery. */
@@ -1029,94 +988,6 @@ function recordStaticRouteDiagnostics(runtimeModel: string): void {
     const ids = Object.keys(getCurrentAntigravityRouting());
     setLastAvailableModels(ids.length > 0 ? ids.join(",") : "static-catalog");
   }
-}
-
-/** Exported for unit tests. */
-export function friendlyAntigravityError(status: number | undefined, text: string): string {
-  const msg = redactSecrets(jsonOrTextError(text)).slice(0, 500);
-  if (status === 400) {
-    if (/Requests ending with a model turn are not supported/i.test(msg)) {
-      return "Antigravity rejected an invalid conversation message boundary. Next: update the extension or add a user message / start a new session, then retry.";
-    }
-    if (
-      /function call turn comes immediately after a user turn or after a function response turn/i.test(
-        msg,
-      )
-    ) {
-      return "Antigravity rejected an invalid function-call message boundary. Next: update the extension or start a new session, then retry; re-login is not required.";
-    }
-    if (/API key not valid|API_KEY_INVALID/i.test(msg)) {
-      return "Antigravity login expired or credentials are invalid. Next: run /login antigravity, then retry.";
-    }
-    if (/Invalid JSON payload|Unknown name/i.test(msg)) {
-      return `Antigravity request format was rejected by the backend (${msg}). Next: switch to a simpler model or retry after updating the extension.`;
-    }
-    if (/Request contains an invalid argument/i.test(msg)) {
-      return `Antigravity rejected this request (${msg}). Next: retry once; if it keeps failing, switch models or re-login.`;
-    }
-    return `Bad request from Antigravity. Next: retry once, then run /login antigravity if it keeps failing. Backend said: ${msg}`;
-  }
-  if (status === 401) {
-    return "Antigravity authentication failed. Next: run /login antigravity, then retry.";
-  }
-  if (status === 403) {
-    const verifyUrl = extractValidationUrl(text);
-    const verifyHint = verifyUrl
-      ? ` Open this link in a browser signed in to the same Google account to verify: ${verifyUrl}`
-      : "";
-    if (/permission|forbidden|access/i.test(msg) && !verifyUrl) {
-      return "Antigravity access was denied for this account or project. Next: try another model, re-login, or use an account with access.";
-    }
-    return `Antigravity denied this request. Next: re-login or try another model. Backend said: ${msg}${verifyHint}`;
-  }
-  if (status === 404) {
-    if (/Requested entity was not found/i.test(msg)) {
-      return "This model is not available right now. Next: switch to gemini-3.8-flash, gemini-3.7-flash, gemini-3.6-flash, gemini-3.5-flash, gemini-3.1-pro, or another working model.";
-    }
-    return `Antigravity could not find the requested resource. Next: retry or switch models. Backend said: ${msg}`;
-  }
-  if (status === 408) return "Antigravity timed out. Next: retry the same request.";
-  if (status === 409) {
-    return "Antigravity reported a conflict for this request. Next: retry once or start a new chat session.";
-  }
-  if (status === 429) {
-    const wait = msg.match(/Resets? in ([^.\n]+)/i)?.[1]?.trim();
-    if (/Individual quota reached/i.test(msg)) {
-      return `Quota reached. Please wait ${wait || "for reset"}. Next: switch models or try again after reset.`;
-    }
-    // Google answers a real quota wall with a "Resets in …" hint, but uses generic
-    // RESOURCE_EXHAUSTED ("Resource has been exhausted (e.g. check quota).") for
-    // transient throttling and capacity pressure. Classifying on the word "quota"
-    // alone wrongly marked transient throttling as a hard quota wall, disabling
-    // Pi's automatic retry backoff. Keep real quota walls non-retryable, and
-    // format transient throttling so Pi's retry mechanism engages.
-    const hardLimit =
-      Boolean(wait) ||
-      (!/rate.?limit/i.test(msg) &&
-        /quota exceeded|exceeded your|limit reached|reached your|daily limit/i.test(msg));
-    if (hardLimit) {
-      return `Quota reached.${wait ? ` Please wait ${wait}.` : ""} Next: switch models or retry later.`;
-    }
-    if (/rate.?limit|too many requests/i.test(msg)) {
-      return "Rate limited by Antigravity (429 ResourceExhausted). Next: retrying automatically; if it persists, switch models.";
-    }
-    // A generic RESOURCE_EXHAUSTED body, with no reset hint, is how unavailable models
-    // such as gemini-3.1-pro fail (#89). Do not include 429/ResourceExhausted: those
-    // tokens make Pi burn its automatic retry budget and look like an account quota wall.
-    return `This model is unavailable right now (${msg || "resource exhausted"}). Next: switch to gemini-3.8-flash or another Flash model. This is not necessarily an account quota wall.`;
-  }
-  if (status === 500) {
-    return "Antigravity had an internal server error. Next: retry in a moment or switch models.";
-  }
-  if (status === 502) return "Antigravity returned a bad gateway error. Next: retry in a moment.";
-  if (status === 503) {
-    if (/No capacity available/i.test(msg)) {
-      return "This model has no capacity right now. Next: retry later or switch to another model.";
-    }
-    return "Antigravity is temporarily unavailable. Next: retry in a moment or switch models.";
-  }
-  if (status === 504) return "Antigravity timed out upstream. Next: retry in a moment.";
-  return msg;
 }
 
 function createOutput(model: Model<Api>): AssistantMessage {
@@ -1264,7 +1135,7 @@ export async function fetchWithHeaderDeadline(
   callerSignal: AbortSignal | undefined,
   timeoutMs: number,
   stallMs: number = 0,
-  fetchFn: (input: string, init: RequestInit) => Promise<Response> = antigravityFetch,
+  fetchFn: (input: string, init: RequestInit) => Promise<Response> = antigravityTransport.fetch,
 ): Promise<Response> {
   if (timeoutMs <= 0 && stallMs <= 0) {
     return fetchFn(url, { ...init, signal: callerSignal ?? init.signal });
@@ -1331,8 +1202,9 @@ export async function streamResponse(
     const record = parsed as { error?: { code?: unknown; message?: unknown } };
     const status = typeof record.error?.code === "number" ? record.error.code : undefined;
     if (status !== undefined) setLastStatus(status);
-    const friendly = friendlyAntigravityError(status, stray.slice(start));
-    throw new Error(status ? `${friendly} (${status})` : friendly);
+    throw new Error(
+      renderAntigravityFailure(classifyAntigravityFailure(status, stray.slice(start))),
+    );
   };
 
   const handleLine = (line: string) => {
@@ -1353,8 +1225,11 @@ export async function streamResponse(
     if (chunk.error) {
       const status = typeof chunk.error.code === "number" ? chunk.error.code : undefined;
       if (status !== undefined) setLastStatus(status);
-      const friendly = friendlyAntigravityError(status, JSON.stringify({ error: chunk.error }));
-      throw new Error(status ? `${friendly} (${status})` : chunk.error.message || friendly);
+      throw new Error(
+        renderAntigravityFailure(
+          classifyAntigravityFailure(status, JSON.stringify({ error: chunk.error })),
+        ),
+      );
     }
 
     const responseData = chunk.response || chunk;
@@ -1521,15 +1396,12 @@ export function streamAntigravity(
 
   void runWithDiagnostics(async () => {
     const startTime = Date.now();
-    const output = createOutput(model);
+    const output: AntigravityAssistantMessage = createOutput(model);
     try {
-      let creds = parseApiKey(opts.apiKey);
-      const triedAccessTokens = new Set<string>([creds.token]);
-      const primaryEndpoint = endpointCandidates()[0];
-      if (primaryEndpoint) prewarmConnection(primaryEndpoint);
+      const creds = parseApiKey(opts.apiKey);
       // Skip loadCodeAssist roundtrip when credentials already carry a projectId.
       const warmedProject = creds.projectId ? null : await loadCodeAssist(creds.token);
-      let projectId = resolveProjectId({
+      const projectId = resolveProjectId({
         token: creds.token,
         warmedProject,
         credentialProjectId: creds.projectId,
@@ -1557,10 +1429,11 @@ export function streamAntigravity(
         runtimeCandidates.push(fallback);
       }
 
-      let requestHeaders = antigravityHeaders(creds.token);
+      const requestHeaders = antigravityHeaders(creds.token);
 
       let response: Response | undefined;
       let lastText = "";
+      let requestBody: string | undefined;
       let received = false;
       let runtimeModel = initialRuntimeModel;
 
@@ -1575,7 +1448,17 @@ export function streamAntigravity(
           runtimeModel = runtimeCandidates[candIdx]!;
           setLastResolvedRuntimeModel(runtimeModel);
           recordStaticRouteDiagnostics(runtimeModel);
-          const rawPayload = buildRequest(model, context, projectId, opts, runtimeModel);
+          const requestState =
+            opts.reserveRequestState?.() ?? nextRequestState(context, opts.sessionId);
+          output.antigravity = requestState;
+          const rawPayload = buildRequest(
+            model,
+            context,
+            projectId,
+            opts,
+            runtimeModel,
+            requestState,
+          );
           let requestPayload: unknown = rawPayload;
           if (opts.onPayload) {
             const nextPayload = await opts.onPayload(rawPayload, model);
@@ -1583,36 +1466,42 @@ export function streamAntigravity(
           }
           const body =
             typeof requestPayload === "string" ? requestPayload : JSON.stringify(requestPayload);
+          requestBody = body;
 
-          for (const endpoint of endpointCandidates()) {
-            setLastEndpoint(endpoint);
-            response = await fetchWithHeaderDeadline(
-              `${endpoint}/v1internal:streamGenerateContent?alt=sse`,
-              {
-                method: "POST",
-                headers: requestHeaders,
-                body,
-              },
-              opts.signal,
-              streamHeaderTimeoutMs(),
-              streamStallTimeoutMs(),
-            );
-            setLastStatus(response.status);
-            if (response.ok) {
-              if (opts.onResponse) {
-                const headersObj: Record<string, string> = {};
-                response.headers.forEach((v, k) => {
-                  headersObj[k] = v;
-                });
-                await opts.onResponse({ status: response.status, headers: headersObj }, model);
-              }
-              break;
+          if (requestState.requestIndex === 0) {
+            await registerTrajectory({
+              token: creds.token,
+              projectId,
+              trajectoryId: requestState.trajectoryId,
+              sessionId: requestState.sessionId,
+              firstMessage: firstUserMessage(context),
+              signal: opts.signal,
+            });
+          }
+          const endpoint = antigravityEndpoint();
+          setLastEndpoint(endpoint);
+          response = await fetchWithHeaderDeadline(
+            `${endpoint}/v1internal:streamGenerateContent?alt=sse`,
+            {
+              method: "POST",
+              headers: requestHeaders,
+              body,
+            },
+            opts.signal,
+            streamHeaderTimeoutMs(),
+            streamStallTimeoutMs(),
+          );
+          setLastStatus(response.status);
+          if (response.ok) {
+            if (opts.onResponse) {
+              const headersObj: Record<string, string> = {};
+              response.headers.forEach((v, k) => {
+                headersObj[k] = v;
+              });
+              await opts.onResponse({ status: response.status, headers: headersObj }, model);
             }
+          } else {
             lastText = await response.text();
-            if (response.status === 429 && isAccountQuota429(lastText)) break;
-            // Generic resource exhaustion is a dead model, not a reason to walk every endpoint.
-            if (response.status === 429 && !isRetryableRateLimit(lastText)) break;
-            if (![403, 404, 429, 500, 502, 503, 504].includes(response.status)) break;
           }
 
           if (response?.ok) break;
@@ -1640,57 +1529,15 @@ export function streamAntigravity(
         }
 
         if (!response || !response.ok) {
-          if (antigravityEnv("DEBUG_DUMP") === "1") {
-            try {
-              const body = JSON.stringify(
-                buildRequest(model, context, projectId, opts, runtimeModel),
-              );
-              let parsedBody: unknown = body;
-              try {
-                parsedBody = JSON.parse(body) as unknown;
-              } catch {
-                parsedBody = body;
-              }
-              await (
-                await import("node:fs/promises")
-              ).writeFile(
-                "/tmp/antigravity-last-request.json",
-                JSON.stringify(
-                  {
-                    status: response?.status,
-                    runtimeModel,
-                    lastText: lastText.slice(0, 4000),
-                    body: parsedBody,
-                  },
-                  null,
-                  2,
-                ),
-              );
-            } catch {
-              // ignore dump failures
-            }
-          }
-          const friendly = friendlyAntigravityError(response?.status, lastText);
-          if (response?.status === 429 && /Quota reached\./i.test(friendly)) {
-            const next = await failoverToNextAccount(triedAccessTokens);
-            if (next) {
-              triedAccessTokens.add(next.token);
-              creds = next;
-              requestHeaders = antigravityHeaders(creds.token);
-              const switchedProject = creds.projectId ? null : await loadCodeAssist(creds.token);
-              projectId = resolveProjectId({
-                token: creds.token,
-                warmedProject: switchedProject,
-                credentialProjectId: creds.projectId,
-              });
-              setLastProjectId(projectId);
-              emptyAttempt = -1;
-              continue;
-            }
-            throw new Error(friendly);
-          }
+          await dumpFailedRequest({
+            status: response?.status,
+            runtimeModel,
+            body: requestBody,
+            errorText: lastText,
+          });
+          const failure = classifyAntigravityFailure(response?.status, lastText);
           throw new Error(
-            `Antigravity API error (${publicErrorStatus(response?.status, friendly)}, ${formatRequestDiagnostics({ projectId, runtimeModel })}): ${friendly}`,
+            `Antigravity API error (${formatRequestDiagnostics({ projectId, runtimeModel })}): ${renderAntigravityFailure(failure)}`,
           );
         }
 
@@ -1719,6 +1566,7 @@ export function streamAntigravity(
         setLastError(output.errorMessage);
         stream.push({ type: "error", reason: output.stopReason, error: output });
       } else if (output.stopReason === "pending") {
+        // Pi's stop-reason union includes "pending"; a completed stream never carries it.
         throw new Error("Antigravity API returned no stop reason");
       } else {
         stream.push({ type: "done", reason: output.stopReason, message: output });
@@ -1730,9 +1578,7 @@ export function streamAntigravity(
       output.errorMessage = safeError(error);
       setLastError(output.errorMessage);
       // Ensure endpoint is recorded even if failure happened before setLastEndpoint.
-      if (!getCurrentEndpoint() && endpointCandidates()[0]) {
-        setLastEndpoint(endpointCandidates()[0]);
-      }
+      if (!getCurrentEndpoint()) setLastEndpoint(antigravityEndpoint());
       stream.push({ type: "error", reason: output.stopReason, error: output });
       stream.end();
     }

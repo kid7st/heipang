@@ -1079,6 +1079,25 @@ select {
 .account-card {
 	gap: 6px;
 }
+.antigravity-account {
+	grid-column: 1 / -1;
+	gap: 10px;
+}
+.antigravity-account input {
+	width: 100%;
+	box-sizing: border-box;
+	border: 1px solid var(--border);
+	border-radius: 8px;
+	padding: 8px 10px;
+}
+.antigravity-actions {
+	display: flex;
+	gap: 8px;
+}
+.antigravity-error {
+	color: var(--danger);
+	overflow-wrap: anywhere;
+}
 .account-top {
 	display: flex;
 	justify-content: space-between;

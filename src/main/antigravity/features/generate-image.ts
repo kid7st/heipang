@@ -4,13 +4,17 @@
  * and `/antigravity.image` without registering `generate_image`.
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { StringEnum, Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import {
   DEFAULT_IMAGE_MODEL,
   generateAntigravityImage,
   IMAGE_ASPECT_RATIOS,
 } from "../image/index.js";
+import { resolveRelayApiKey } from "../auth/index.js";
 import { isExtraToolEnabled } from "../utils/index.js";
+
+/** Model-facing enum over the accepted ratios; TypeBox keeps the argument type narrowed. */
+const ASPECT_RATIO_SCHEMA = Type.Union(IMAGE_ASPECT_RATIOS.map((ratio) => Type.Literal(ratio)));
 
 export default function (pi: ExtensionAPI): void {
   if (!isExtraToolEnabled("IMAGE")) return;
@@ -25,7 +29,7 @@ export default function (pi: ExtensionAPI): void {
     ],
     parameters: Type.Object({
       prompt: Type.String({ description: "Image description." }),
-      aspectRatio: Type.Optional(StringEnum(IMAGE_ASPECT_RATIOS)),
+      aspectRatio: Type.Optional(ASPECT_RATIO_SCHEMA),
       model: Type.Optional(
         Type.String({
           description: `Image model id. Default: ${DEFAULT_IMAGE_MODEL}.`,
@@ -38,10 +42,7 @@ export default function (pi: ExtensionAPI): void {
       ),
     }),
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
-      const apiKey = await ctx.modelRegistry.getApiKeyForProvider("antigravity");
-      if (!apiKey) {
-        throw new Error("No Antigravity credentials. Run /login antigravity first.");
-      }
+      const apiKey = await resolveRelayApiKey(signal);
       onUpdate?.({ content: [{ type: "text", text: "Generating image…" }], details: {} });
       const result = await generateAntigravityImage({
         apiKey,
