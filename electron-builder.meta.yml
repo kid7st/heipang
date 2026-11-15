@@ -14,7 +14,7 @@ files:
   - package.json
   - "!**/*.map"
 asarUnpack:
-  - node_modules/@mariozechner/**
+  - node_modules/@earendil-works/**
   - node_modules/jiti/**
 mac:
   target: dmg
