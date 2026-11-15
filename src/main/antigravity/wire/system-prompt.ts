@@ -10,6 +10,12 @@ export const HARNESS_NAME = "antigravity";
 // A standalone word only: "piece", "pi-coding-agent" and "PI_VERSION" stay as they are.
 const STANDALONE_PI = /(?<=^|\s)pi(?![\w-])/gi;
 
+// Upstream reports 429 responses for this exact Pi documentation phrase.
+const CODEMODE_DOCS_BLURB =
+  /codemode scripts and non-LLM models such as classifiers and image models/g;
+
 export function renameHarness(systemPrompt: string): string {
-  return systemPrompt.replace(STANDALONE_PI, HARNESS_NAME);
+  return systemPrompt
+    .replace(STANDALONE_PI, HARNESS_NAME)
+    .replace(CODEMODE_DOCS_BLURB, "codemode scripts");
 }

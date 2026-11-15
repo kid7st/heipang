@@ -49,7 +49,7 @@ The URL must be an HTTPS origin without credentials, paths, query parameters or 
 
 External copies of the `pi-antigravity` package are excluded from HEIPANG's active extensions to avoid duplicate providers, commands and tools. They remain installed for CLI use. Existing `auth.json` OAuth credentials are left untouched; HEIPANG overrides them only in memory while its relay connection is configured.
 
-The bundled source in `src/main/antigravity/` comes from pi-antigravity 0.11.0 (MIT; see its `LICENSE`), with application-specific configuration, provider availability, project-cache isolation and redirect protection.
+The bundled source in `src/main/antigravity/` comes from pi-antigravity 0.11.0 (MIT; see its `LICENSE`), with application-specific configuration, provider availability, project-cache isolation and redirect protection. It includes upstream's system-prompt fix from `72e4786`: the exact phrase `codemode scripts and non-LLM models such as classifiers and image models` is shortened to `codemode scripts` in system instructions and injected skill instructions. Ordinary user messages are not rewritten.
 
 ## DeepSeek built-in models
 

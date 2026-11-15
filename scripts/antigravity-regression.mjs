@@ -192,5 +192,42 @@ assert.deepEqual(thinkingWire("gemini-4-hydrogen-xhigh", "xhigh"), { includeThou
 assert.deepEqual(thinkingWire("gemini-4-argon-low", "off"), { includeThoughts: false });
 resetAntigravityCatalogForTests();
 
+const { renameHarness } = await jiti.import(resolve("src/main/antigravity/wire/system-prompt.ts"));
+const { buildRequest } = await jiti.import(resolve("src/main/antigravity/stream/stream.ts"));
+const docsBlurb = "codemode scripts and non-LLM models such as classifiers and image models";
+const docsLine = `- When asked about: MCP servers (docs/mcp.md), ${docsBlurb} (docs/codemode.md)`;
+const shortenedDocsLine = "- When asked about: MCP servers (docs/mcp.md), codemode scripts (docs/codemode.md)";
+assert.equal(renameHarness(docsLine), shortenedDocsLine);
+assert.equal(renameHarness(`${docsBlurb}\n${docsBlurb}`), "codemode scripts\ncodemode scripts");
+assert.equal(renameHarness("You are running inside pi. Ask Pi."), "You are running inside antigravity. Ask antigravity.");
+for (const text of ["a piece of pie", "pi-coding-agent and @earendil-works/pi-coding-agent", "PI_VERSION and PI_CODING_AGENT_DIR", "/Users/me/.pi/agent/settings.json"]) {
+	assert.equal(renameHarness(text), text);
+}
+const normalized = renameHarness(`You are running inside pi.\n${docsLine}`);
+assert.equal(renameHarness(normalized), normalized);
+const promptModel = {
+	...ANTIGRAVITY_MODELS.find((model) => model.id === "gemini-3.8-flash"),
+	provider: "antigravity",
+	api: "antigravity-api",
+	baseUrl: "https://relay.example.test",
+};
+const userText = `Explain pi and the phrase: ${docsBlurb}`;
+const promptContext = {
+	systemPrompt: `You are running inside pi.\n${docsLine}`,
+	messages: [{ role: "user", content: userText, timestamp: 1 }],
+};
+const promptSnapshot = JSON.stringify(promptContext);
+const request = buildRequest(promptModel, promptContext, "project-1", {}, "gemini-3.8-flash-low");
+assert.equal(request.request.systemInstruction.parts[0].text, `You are running inside antigravity.\n${shortenedDocsLine}`);
+assert.deepEqual(request.request.contents[0].parts, [{ text: userText }]);
+assert.equal(JSON.stringify(promptContext), promptSnapshot);
+const skillContext = {
+	...promptContext,
+	messages: [{ role: "user", content: `<skill name="docs">Inside pi. ${docsBlurb}</skill>\n${userText}`, timestamp: 1 }],
+};
+const skillRequest = buildRequest(promptModel, skillContext, "project-1", {}, "gemini-3.8-flash-low");
+assert.equal(skillRequest.request.systemInstruction.parts[1].text, '<skill name="docs">Inside antigravity. codemode scripts</skill>');
+assert.equal(skillRequest.request.contents[0].parts[0].text.trim(), userText);
+
 await rm(root, { recursive: true, force: true });
-console.log("PASS: Antigravity relay validation, encrypted persistence, project isolation, legacy credential override, model availability and Gemini 4 routing");
+console.log("PASS: Antigravity relay validation, encrypted persistence, project isolation, legacy credential override, model availability, Gemini 4 routing and system prompt normalization");
