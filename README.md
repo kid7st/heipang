@@ -88,10 +88,10 @@ node scripts/session-regression.mjs # Session ownership, input cancellation, mod
 
 源码、安装包和更新源都在公开仓库 `kid7st/heipang`，更新源就是 GitHub Release：
 
-1. 把 `package.json` 的 `version` 加一，合入 `main`。
+1. 把 `package.json` 的 `version` 加一，并新增 `release-notes/<version>.md`（面向用户的更新说明，应用内会显示），合入 `main`。
 2. 打同版本的标签并推送：`git tag meta-v<version> && git push origin meta-v<version>`。
-3. `.github/workflows/release-meta.yml` 构建 `HEIPANG-Meta-arm64.dmg` 和 `HEIPANG-Meta-Setup.exe`，并自动创建 Release（标签必须等于 `meta-v` + `package.json` 版本，否则发布失败）。
+3. `.github/workflows/release-meta.yml` 构建 `HEIPANG-Meta-arm64.dmg` 和 `HEIPANG-Meta-Setup.exe`，并自动创建 Release（标签必须等于 `meta-v` + `package.json` 版本，且说明文件存在，否则在构建前就失败）。
 
-应用内更新读取最新的已发布 Release（草稿和预发布不算）：版本号来自标签，更新说明来自 Release 正文，安装包取 `.dmg` / `.exe` 资产。
+应用内更新读取最新的已发布 Release（草稿和预发布不算）：版本号来自标签，更新说明来自 Release 正文（即 `release-notes/<version>.md`），安装包取 `.dmg` / `.exe` 资产。
 
 `models-catalog.json` 位于仓库根目录，应用从 `main` 读取。
