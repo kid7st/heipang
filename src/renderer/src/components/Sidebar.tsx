@@ -188,7 +188,7 @@ export function Sidebar({
 			return b.latest - a.latest;
 		});
 		return arr;
-	}, [sessions, q, folderOrder]);
+	}, [sessions, q, folderOrder, workspaceNames]);
 
 	const reorder = (target: string) => {
 		if (!dragCwd || dragCwd === target) return;

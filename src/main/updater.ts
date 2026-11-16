@@ -1,26 +1,19 @@
-import { app, net } from "electron";
+import { app, net, shell } from "electron";
 import { spawn } from "node:child_process";
-import { chmodSync, createWriteStream, mkdtempSync, writeFileSync } from "node:fs";
+import { closeSync, createWriteStream, mkdtempSync, openSync, readFileSync, writeFileSync } from "node:fs";
+import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import type { UpdateCheck } from "../shared/types.js";
+import { MAC_INSTALL_SCRIPT, prepareMacUpdate } from "./mac-update.js";
 
-// Public release feed. Source code stays in the private repo; only installers
-// + these small JSON files live in the public `heipang-releases` repo, so the
-// app can fetch updates anonymously (no embedded token).
 const RELEASE_FEED_BASE = "https://raw.githubusercontent.com/kuaai/heipang-releases/main";
 
-// Both parallel builds share package.json `name` ("heipang"), so app.getName()
-// is identical for HEIPANG and HEIPANG Meta. Detect the variant from the bundle
-// path/appId instead, so each app updates from its own feed.
-function isMetaBuild(): boolean {
-	const hay = `${process.execPath} ${app.getAppPath()}`;
-	return /HEIPANG Meta|heipang[._-]meta/i.test(hay);
-}
-
 function latestUrl(): string {
-	if (isMetaBuild()) return `${RELEASE_FEED_BASE}/meta-latest.json`;
-	return `${RELEASE_FEED_BASE}/heipang-latest.json`;
+	const metadata = JSON.parse(readFileSync(join(app.getAppPath(), "package.json"), "utf8"));
+	if (metadata.updateChannel === "meta") return `${RELEASE_FEED_BASE}/meta-latest.json`;
+	if (metadata.updateChannel === "stable") return `${RELEASE_FEED_BASE}/heipang-latest.json`;
+	throw new Error("The application has no valid update channel");
 }
 
 interface RemoteLatest {
@@ -30,7 +23,6 @@ interface RemoteLatest {
 	win?: string;
 }
 
-// 0.1.2 > 0.1.10? handled numerically per dotted/dashed segment.
 function cmpVer(a: string, b: string): number {
 	const pa = a.split(/[.-]/).map((n) => parseInt(n, 10) || 0);
 	const pb = b.split(/[.-]/).map((n) => parseInt(n, 10) || 0);
@@ -49,9 +41,10 @@ function fetchText(url: string): Promise<string> {
 		req.on("response", (res) => {
 			if (res.statusCode && res.statusCode >= 400) {
 				reject(new Error(`HTTP ${res.statusCode}`));
+				req.abort();
 				return;
 			}
-			res.on("data", (c) => (body += c.toString()));
+			res.on("data", (chunk) => (body += chunk.toString()));
 			res.on("end", () => resolve(body));
 			res.on("error", reject);
 		});
@@ -68,97 +61,120 @@ export async function checkForUpdate(): Promise<UpdateCheck> {
 		const url = process.platform === "darwin" ? data.mac : data.win;
 		const hasUpdate = !!latest && cmpVer(latest, current) > 0 && !!url;
 		return { current, latest, hasUpdate, notes: data.notes, url };
-	} catch (e: any) {
-		return { current, hasUpdate: false, error: e?.message || "check failed" };
+	} catch (error) {
+		return { current, hasUpdate: false, error: error instanceof Error ? error.message : String(error) };
 	}
 }
 
-function download(url: string, dest: string, onPct: (pct: number) => void): Promise<void> {
+export function download(url: string, dest: string, onPct: (pct: number) => void): Promise<void> {
 	return new Promise((resolve, reject) => {
 		const req = net.request({ url, redirect: "follow" });
+		let out: ReturnType<typeof createWriteStream> | undefined;
+		let settled = false;
+		const fail = (error: Error) => {
+			if (settled) return;
+			settled = true;
+			reject(error);
+			out?.destroy();
+			req.abort();
+		};
 		req.on("response", (res) => {
 			if (res.statusCode && res.statusCode >= 400) {
-				reject(new Error(`HTTP ${res.statusCode}`));
+				fail(new Error(`HTTP ${res.statusCode}`));
 				return;
 			}
-			const total = parseInt((res.headers["content-length"] as string) || "0", 10);
+			const total = Number(res.headers["content-length"]) || 0;
 			let got = 0;
 			let last = 0;
-			const out = createWriteStream(dest);
+			out = createWriteStream(dest);
+			out.on("error", fail);
+			out.on("finish", () => {
+				if (settled) return;
+				settled = true;
+				resolve();
+			});
 			res.on("data", (chunk: Buffer) => {
 				got += chunk.length;
-				out.write(chunk);
+				out!.write(chunk);
 				if (total) {
 					const pct = Math.min(99, Math.round((got / total) * 100));
-					if (pct !== last) {
-						last = pct;
-						onPct(pct);
-					}
+					if (pct !== last) { last = pct; onPct(pct); }
 				}
 			});
-			res.on("end", () => out.end(() => resolve()));
-			res.on("error", reject);
+			res.on("end", () => {
+				if (total && got !== total) fail(new Error("The installer download was incomplete"));
+				else out!.end();
+			});
+			res.on("aborted", () => fail(new Error("The installer download was interrupted")));
+			res.on("error", fail);
 		});
-		req.on("error", reject);
+		req.on("error", fail);
 		req.end();
 	});
 }
 
+async function launchInstaller(command: string, args: string[], logPath: string): Promise<void> {
+	const log = openSync(logPath, "a", 0o600);
+	try {
+		await new Promise<void>((resolve, reject) => {
+			const child = spawn(command, args, { detached: true, stdio: ["ignore", log, log] });
+			child.once("error", reject);
+			child.once("spawn", () => { child.unref(); resolve(); });
+		});
+	} finally { closeSync(log); }
+}
+
 export type UpdatePhase = "download" | "install" | "relaunch" | "error";
 type Emit = (phase: UpdatePhase, pct?: number, message?: string) => void;
+let installing = false;
 
-export async function downloadAndInstall(url: string, emit: Emit): Promise<void> {
-	const dir = mkdtempSync(join(tmpdir(), "heipang-up-"));
+export async function downloadAndInstall(url: string, emit: Emit, beforeInstall: () => Promise<void>): Promise<void> {
+	if (installing) throw new Error("An update is already in progress");
+	installing = true;
+	let stage: string | undefined;
+	let shutdownStarted = false;
 	try {
+		const dir = mkdtempSync(join(tmpdir(), "heipang-up-"));
 		emit("download", 0);
 		if (process.platform === "darwin") {
-			const dmg = join(dir, `${app.getName()}-update.dmg`);
-			await download(url, dmg, (p) => emit("download", p));
+			const dmg = join(dir, "update.dmg");
+			await download(url, dmg, (pct) => emit("download", pct));
 			emit("install");
-			// /Applications/AppName.app/Contents/MacOS/AppName -> /Applications/AppName.app
-			const appPath = `${process.execPath.split(".app/")[0]}.app`;
+			const boundary = process.execPath.indexOf(".app/");
+			if (boundary < 0) throw new Error("Install the application before using automatic updates");
+			const appPath = process.execPath.slice(0, boundary + 4);
+			try {
+				stage = await prepareMacUpdate(dmg, appPath);
+			} catch (error) {
+				const openError = await shell.openPath(dmg);
+				const reason = error instanceof Error ? error.message : String(error);
+				throw new Error(`${reason}. ${openError ? `Could not open the manual installer: ${openError}` : "The installer has been opened for a manual update."}`);
+			}
 			const script = join(dir, "install.sh");
-			writeFileSync(
-				script,
-				`#!/bin/bash
-DMG=${JSON.stringify(dmg)}
-APP=${JSON.stringify(appPath)}
-sleep 1
-for i in $(seq 1 40); do
-  pgrep -f "$APP/Contents/MacOS/" >/dev/null || break
-  sleep 1
-done
-MNT="$(mktemp -d)"
-if hdiutil attach "$DMG" -nobrowse -mountpoint "$MNT" -quiet; then
-  SRC="$(/bin/ls -d "$MNT"/*.app 2>/dev/null | head -1)"
-  if [ -n "$SRC" ] && rm -rf "$APP" && cp -R "$SRC" "$(dirname "$APP")/"; then
-    hdiutil detach "$MNT" -quiet || true
-    xattr -cr "$APP" 2>/dev/null || true
-    open "$APP"
-    exit 0
-  fi
-  hdiutil detach "$MNT" -quiet || true
-fi
-# fallback: couldn't replace in place (permissions) -> open the dmg for manual drag
-open "$DMG"
-`,
-			);
-			chmodSync(script, 0o755);
-			spawn("/bin/bash", [script], { detached: true, stdio: "ignore" }).unref();
-			emit("relaunch");
-			setTimeout(() => app.quit(), 700);
-			return;
+			writeFileSync(script, MAC_INSTALL_SCRIPT, { mode: 0o700 });
+			shutdownStarted = true;
+			await beforeInstall();
+			await launchInstaller("/bin/bash", [script, appPath, stage, dmg, String(process.pid)], join(dir, "install.log"));
+		} else if (process.platform === "win32") {
+			const exe = join(dir, "Setup.exe");
+			await download(url, exe, (pct) => emit("download", pct));
+			emit("install");
+			shutdownStarted = true;
+			await beforeInstall();
+			await launchInstaller(exe, ["/S", "--force-run"], join(dir, "install.log"));
+		} else {
+			throw new Error("Automatic updates are supported on macOS and Windows only");
 		}
-
-		// Windows: NSIS silent update. electron-builder's installer relaunches the
-		// app automatically after a `/S` silent install.
-		const exe = join(dir, `${app.getName().replace(/\s+/g, "-")}-Setup.exe`);
-		await download(url, exe, (p) => emit("download", p));
-		emit("install");
-		spawn(exe, ["/S", "--force-run"], { detached: true, stdio: "ignore" }).unref();
 		emit("relaunch");
 		setTimeout(() => app.quit(), 700);
-	} catch (e: any) {
-		emit("error", undefined, e?.message || "update failed");
+	} catch (error) {
+		let failure = error;
+		try { if (stage) await rm(stage, { recursive: true, force: true }); }
+		catch (cleanupError) {
+			failure = new AggregateError([error, cleanupError], `${String(error)}; update cleanup failed: ${String(cleanupError)}`);
+		}
+		installing = false;
+		const message = failure instanceof Error ? failure.message : String(failure);
+		emit("error", undefined, `${message}${shutdownStarted ? ". Restart the application before continuing to work." : ""}`);
 	}
 }

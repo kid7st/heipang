@@ -1,12 +1,8 @@
 import { useState } from "react";
 
-export interface PendingRequest {
-	id: string;
-	kind: string;
-	payload: any;
-}
+import type { InputRequest } from "../../../shared/types";
 
-export function RequestDialog({ req, onClose }: { req: PendingRequest; onClose: () => void }) {
+export function RequestDialog({ req, onClose }: { req: InputRequest; onClose: () => void }) {
 	const [value, setValue] = useState("");
 
 	const message = req.payload?.message ?? (req.kind === "code" ? "Paste the authorization code" : "Input required");
@@ -21,7 +17,7 @@ export function RequestDialog({ req, onClose }: { req: PendingRequest; onClose: 
 		<div className="modal-backdrop nested">
 			<div className="modal request-modal" onClick={(e) => e.stopPropagation()}>
 				<div className="modal-head">
-					<h2>Sign in</h2>
+					<h2>{req.payload.title ?? "Sign in"}</h2>
 				</div>
 				<div className="request-msg">{message}</div>
 

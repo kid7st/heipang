@@ -5,6 +5,8 @@
 #   electron-builder --config electron-builder.meta.yml --win nsis --x64
 appId: com.elylyly.heipang.meta
 productName: HEIPANG Meta
+extraMetadata:
+  updateChannel: meta
 npmRebuild: false
 directories:
   output: release-meta

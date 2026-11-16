@@ -1,10 +1,9 @@
 import { contextBridge, ipcRenderer } from "electron";
-import type { PiApi, StreamEvent } from "../shared/types.js";
+import type { InputRequest, PiApi, StreamEvent } from "../shared/types.js";
 
 const api: PiApi = {
 	listModels: () => ipcRenderer.invoke("pi:listModels"),
 	addModels: (models) => ipcRenderer.invoke("pi:addModels", models),
-	removeModel: (provider, id) => ipcRenderer.invoke("pi:removeModel", provider, id),
 	fetchRemoteModels: () => ipcRenderer.invoke("pi:fetchRemoteModels"),
 	fetchRemoteOpenAIModels: () => ipcRenderer.invoke("pi:fetchRemoteOpenAIModels"),
 	fetchRemoteAntigravityModels: () => ipcRenderer.invoke("pi:fetchRemoteAntigravityModels"),
@@ -21,12 +20,11 @@ const api: PiApi = {
 	renameSession: (path, name) => ipcRenderer.invoke("pi:renameSession", path, name),
 
 	getTasks: () => ipcRenderer.invoke("pi:getTasks"),
-	updateTask: (task) => ipcRenderer.invoke("pi:updateTask", task),
-	deleteTask: (id) => ipcRenderer.invoke("pi:deleteTask", id),
-	extractTasks: () => ipcRenderer.invoke("pi:extractTasks"),
+	updateTask: (task, sessionId) => ipcRenderer.invoke("pi:updateTask", task, sessionId),
+	deleteTask: (id, sessionId) => ipcRenderer.invoke("pi:deleteTask", id, sessionId),
+	extractTasks: (sessionId) => ipcRenderer.invoke("pi:extractTasks", sessionId),
 
 	getCommands: () => ipcRenderer.invoke("pi:getCommands"),
-	listWorkspaces: () => ipcRenderer.invoke("pi:listWorkspaces"),
 	getAccounts: () => ipcRenderer.invoke("pi:getAccounts"),
 	getAntigravitySettings: () => ipcRenderer.invoke("pi:getAntigravitySettings"),
 	saveAntigravitySettings: (input) => ipcRenderer.invoke("pi:saveAntigravitySettings", input),
@@ -39,13 +37,13 @@ const api: PiApi = {
 	deleteExtension: (path) => ipcRenderer.invoke("pi:deleteExtension", path),
 	deleteSkill: (path) => ipcRenderer.invoke("pi:deleteSkill", path),
 	respondRequest: (id, value) => ipcRenderer.send("pi:respond", id, value),
-	onRequest: (cb: (req: { id: string; kind: string; payload: any }) => void) => {
-		const listener = (_e: unknown, req: { id: string; kind: string; payload: any }) => cb(req);
+	onRequest: (cb) => {
+		const listener = (_e: unknown, req: InputRequest) => cb(req);
 		ipcRenderer.on("pi:request", listener);
 		return () => ipcRenderer.removeListener("pi:request", listener);
 	},
-	onRequestDismiss: (cb: () => void) => {
-		const listener = () => cb();
+	onRequestDismiss: (cb) => {
+		const listener = (_e: unknown, id: string) => cb(id);
 		ipcRenderer.on("pi:request-dismiss", listener);
 		return () => ipcRenderer.removeListener("pi:request-dismiss", listener);
 	},
@@ -57,7 +55,7 @@ const api: PiApi = {
 	setGuiSettings: (p) => ipcRenderer.invoke("pi:setGuiSettings", p),
 	openPath: (p) => ipcRenderer.invoke("pi:openPath", p),
 
-	sendMessage: (text, images) => ipcRenderer.invoke("pi:sendMessage", text, images),
+	sendMessage: (text, images, sessionId) => ipcRenderer.invoke("pi:sendMessage", text, images, sessionId),
 	abort: () => ipcRenderer.invoke("pi:abort"),
 	setModel: (provider, id) => ipcRenderer.invoke("pi:setModel", provider, id),
 	setThinkingLevel: (level) => ipcRenderer.invoke("pi:setThinkingLevel", level),

@@ -59,23 +59,15 @@ export function measuredStream(upstream: any, model: any, options: any, logPath:
 			}
 			output.end();
 		} catch (error) {
-			// pi providers return error events rather than throwing. Preserve the
-			// upstream result if an iterator itself fails during cleanup.
-			try {
-				const message = await (await upstream).result();
-				output.push({ type: "error", reason: message.stopReason, error: message } as any);
-				output.end();
-			} catch {
-				const message = {
-					role: "assistant", content: [], provider: model.provider, model: model.id, api: model.api,
-					timestamp: Date.now(), stopReason: callerSignal?.aborted ? "aborted" : "error",
-					errorMessage: error instanceof Error ? error.message : String(error),
-					usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
-						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
-				};
-				output.push({ type: "error", reason: message.stopReason, error: message } as any);
-				output.end();
-			}
+			const message = {
+				role: "assistant", content: [], provider: model.provider, model: model.id, api: model.api,
+				timestamp: Date.now(), stopReason: callerSignal?.aborted ? "aborted" : "error",
+				errorMessage: error instanceof Error ? error.message : String(error),
+				usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+			};
+			output.push({ type: "error", reason: message.stopReason, error: message } as any);
+			output.end();
 		} finally {
 			if (timer) clearTimeout(timer);
 		}

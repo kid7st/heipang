@@ -216,8 +216,14 @@ export function convertMessages(
   const profile = familyProfile(model.id, runtimeModel);
   const requiresSig = profile.requiresThoughtSignature;
   const droppedToolCallIds = new Map<string, string>();
+  let pendingImages: GeminiInlineDataPart[] = [];
+  const flushPendingImages = () => {
+    appendTurn(contents, GeminiRole.User, pendingImages);
+    pendingImages = [];
+  };
   for (const msg of context.messages) {
     if ((msg.role as string) === "system") continue;
+    if (msg.role !== "toolResult") flushPendingImages();
     if (msg.role === "user") {
       const parts = asTextParts(msg.content);
       appendTurn(contents, GeminiRole.User, parts);
@@ -313,13 +319,16 @@ export function convertMessages(
             response: msg.isError ? { error: responseText } : { output: responseText },
           },
         };
-        appendTurn(contents, profile.isNonGemini ? GeminiRole.User : GeminiRole.Model, [
-          part,
-          ...imageParts,
-        ]);
+        if (profile.isNonGemini) {
+          appendTurn(contents, GeminiRole.User, [part, ...imageParts]);
+        } else {
+          appendTurn(contents, GeminiRole.Model, [part]);
+          pendingImages.push(...imageParts);
+        }
       }
     }
   }
+  flushPendingImages();
 
   // Compaction can remove the user/tool-result boundary required before a function call.
   for (let index = 0; index < contents.length; index += 1) {

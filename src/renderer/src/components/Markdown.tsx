@@ -1,12 +1,10 @@
-import { memo, useEffect, useRef, useState } from "react";
+import { memo, useEffect, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { highlight } from "../highlightClient";
 
 function CodeBlock({ code, lang }: { code: string; lang?: string }) {
 	const [html, setHtml] = useState<string | null>(null);
-	const ref = useRef(code);
-	ref.current = code;
 
 	useEffect(() => {
 		let alive = true;

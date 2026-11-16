@@ -58,6 +58,7 @@ function TaskRow({ task, onUpdate, onDelete }: { task: Task; onUpdate: (t: Task)
 
 export function TaskPanel({
 	tasks,
+	disabled,
 	extracting,
 	models,
 	state,
@@ -71,6 +72,7 @@ export function TaskPanel({
 	onRefreshUsage,
 }: {
 	tasks: Task[];
+	disabled: boolean;
 	extracting: boolean;
 	models: ModelsPayload | null;
 	state: ActiveState | null;
@@ -92,7 +94,7 @@ export function TaskPanel({
 		<div className="taskpanel">
 			<div className="taskpanel-head">
 				<span className="taskpanel-title">Tasks</span>
-				<button className="btn btn-icon" onClick={onExtract} disabled={extracting} title="Re-summarize from the conversation" type="button">
+				<button className="btn btn-icon" onClick={onExtract} disabled={disabled || extracting} title="Re-summarize from the conversation" type="button">
 					{extracting ? <span className="spinner" /> : <RefreshIcon />}
 				</button>
 				<button className="btn btn-icon" onClick={onClose} title="Hide" type="button">
@@ -101,10 +103,14 @@ export function TaskPanel({
 			</div>
 
 			<div className="task-list">
-				{active.length === 0 && <div className="task-empty">No active tasks.{"\n"}Hit refresh to summarize the conversation.</div>}
-				{active.map((t) => (
-					<TaskRow key={t.id} task={t} onUpdate={onUpdate} onDelete={onDelete} />
-				))}
+				{disabled ? (
+					<div className="task-empty" role="status">{state ? "Loading tasks…" : "Open a conversation to view tasks."}</div>
+				) : <>
+					{active.length === 0 && <div className="task-empty">No active tasks.{"\n"}Hit refresh to summarize the conversation.</div>}
+					{active.map((t) => (
+						<TaskRow key={t.id} task={t} onUpdate={onUpdate} onDelete={onDelete} />
+					))}
+				</>}
 			</div>
 
 			<BottomBar

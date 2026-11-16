@@ -3,6 +3,7 @@ import type {
 	ActiveState,
 	CommandInfo,
 	GuiSettings,
+	InputRequest,
 	ModelsPayload,
 	SessionListItem,
 	Task,
@@ -16,7 +17,7 @@ import { HeaderBar } from "./components/HeaderBar";
 import { MemoryEditor } from "./components/MemoryEditor";
 import { MessageList } from "./components/MessageList";
 import { PromptModal, type PromptSpec } from "./components/PromptModal";
-import { RequestDialog, type PendingRequest } from "./components/RequestDialog";
+import { RequestDialog } from "./components/RequestDialog";
 import { SettingsModal } from "./components/SettingsModal";
 import { Sidebar } from "./components/Sidebar";
 import { TaskPanel } from "./components/TaskPanel";
@@ -61,15 +62,21 @@ export default function App() {
 	const [convLoading, setConvLoading] = useState(false);
 	const [extracting, setExtracting] = useState(false);
 	const [settingsTab, setSettingsTab] = useState<"general" | "models" | "accounts" | "extensions" | "skills" | null>(null);
-	const [request, setRequest] = useState<PendingRequest | null>(null);
+	const [request, setRequest] = useState<InputRequest | null>(null);
 	const [unread, setUnread] = useState<Set<string>>(new Set());
 	const [bgRunning, setBgRunning] = useState<{ path: string; cwd: string }[]>([]);
 	const [memory, setMemory] = useState<{ cwd?: string; label: string } | null>(null);
 	const [promptSpec, setPromptSpec] = useState<PromptSpec | null>(null);
 	const [toast, setToast] = useState<string | null>(null);
+	const [changingSession, setChangingSession] = useState<string | undefined>();
+	const changingSessionRef = useRef<string | undefined>(undefined);
 
 	const activeFileRef = useRef<string | undefined>(undefined);
 	activeFileRef.current = state?.sessionFile;
+	const activeSessionRef = useRef<string | undefined>(undefined);
+	activeSessionRef.current = state?.sessionId;
+	const navigationRef = useRef(0);
+	const navigatingRef = useRef(false);
 
 	const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 	const flash = useCallback((msg: string) => {
@@ -79,8 +86,9 @@ export default function App() {
 	}, []);
 
 	const refreshSessions = useCallback(async () => {
-		setSessions(await window.pi.listSessions());
-	}, []);
+		try { setSessions(await window.pi.listSessions()); }
+		catch (error) { flash(error instanceof Error ? error.message : String(error)); }
+	}, [flash]);
 	const sessionRefreshTimers = useRef<ReturnType<typeof setTimeout>[]>([]);
 	const queueRefreshSessions = useCallback(
 		(delays: number[] = [250]) => {
@@ -106,6 +114,7 @@ export default function App() {
 
 	useEffect(() => {
 		(async () => {
+			const navigation = navigationRef.current;
 			const [m, st, msgs, g, t, cmds] = await Promise.all([
 				window.pi.listModels(),
 				window.pi.getActiveState(),
@@ -115,13 +124,16 @@ export default function App() {
 				window.pi.getCommands(),
 			]);
 			setModels(m);
-			setState(st);
-			setMessages(msgs);
+			if (navigation === navigationRef.current && (!activeSessionRef.current || activeSessionRef.current === st?.sessionId)) {
+				activeSessionRef.current = st?.sessionId;
+				setState(st);
+				setMessages(msgs);
+				setTasks(t);
+				setCommands(cmds);
+			}
 			setGui(g);
 			setSbWidth(g.sidebarWidth);
 			setRightWidth(g.rightPanelWidth ?? 320);
-			setTasks(t);
-			setCommands(cmds);
 		})();
 		// Startup needs one session scan. The old retry schedule scanned every
 		// JSONL four times (0/0.7/2/5s), which was especially slow with image-heavy sessions.
@@ -131,6 +143,13 @@ export default function App() {
 
 	useEffect(() => {
 		return window.pi.onEvent((e) => {
+			if (e.type === "messages" || e.type === "patch" || e.type === "tasks") {
+				if (navigatingRef.current || e.sessionId !== activeSessionRef.current) return;
+			}
+			if (e.type === "state") {
+				if (navigatingRef.current || (activeSessionRef.current && activeSessionRef.current !== e.state.sessionId)) return;
+				activeSessionRef.current = e.state.sessionId;
+			}
 			switch (e.type) {
 				case "messages":
 					setMessages(e.messages);
@@ -167,7 +186,7 @@ export default function App() {
 	}, [flash, queueRefreshSessions]);
 
 	useEffect(() => window.pi.onRequest((req) => setRequest(req)), []);
-	useEffect(() => window.pi.onRequestDismiss(() => setRequest(null)), []);
+	useEffect(() => window.pi.onRequestDismiss((id) => setRequest((current) => current?.id === id ? null : current)), []);
 
 	// Copy as PLAIN TEXT only (no bubble/code background or other HTML formatting
 	// leaks into the clipboard). Links are kept as readable text + URL.
@@ -198,6 +217,7 @@ export default function App() {
 		return () => document.removeEventListener("copy", onCopy, true);
 	}, []);
 
+	const changingCurrentSession = !!changingSession && changingSession === state?.sessionId;
 	const streaming = !!state?.isStreaming;
 	const runActive = streaming || !!state?.isRetrying;
 	const wasRunActive = useRef(false);
@@ -227,6 +247,12 @@ export default function App() {
 		flash(`${u.provider} usage — ${parts.join(" · ") || "no data"}`);
 	}, [flash]);
 
+	const assertConversationAvailable = useCallback(() => {
+		if (changingSessionRef.current && changingSessionRef.current === activeSessionRef.current) {
+			throw new Error("This session is being deleted or archived. Wait for the operation to finish.");
+		}
+	}, []);
+
 	const onSend = useCallback(
 		async (text: string, images: { data: string; mimeType: string; name?: string }[]) => {
 			const cmd = text.trim();
@@ -235,32 +261,78 @@ export default function App() {
 				showUsage();
 				return;
 			}
-			const hadSession = !!state;
-			await window.pi.sendMessage(text, images);
+			assertConversationAvailable();
+			const navigation = navigationRef.current;
+			const sessionId = activeSessionRef.current ?? null;
+			await window.pi.sendMessage(text, images, sessionId);
 			queueRefreshSessions();
-			if (!hadSession) setState(await window.pi.getActiveState());
+			if (!sessionId && navigation === navigationRef.current) {
+				const current = await window.pi.getActiveState();
+				if (navigation === navigationRef.current) {
+					activeSessionRef.current = current?.sessionId;
+					setState(current);
+				}
+			}
 		},
-		[state, queueRefreshSessions, showUsage],
+		[assertConversationAvailable, queueRefreshSessions, showUsage],
 	);
+
+	const syncActiveSession = useCallback(async (navigation: number) => {
+		const previousSession = activeSessionRef.current;
+		const [current, messages] = await Promise.all([window.pi.getActiveState(), window.pi.getMessages()]);
+		if (navigation !== navigationRef.current || previousSession !== activeSessionRef.current) return;
+		activeFileRef.current = current?.sessionFile;
+		activeSessionRef.current = current?.sessionId;
+		setState(current);
+		setMessages(messages);
+		setTasks([]);
+		setCommands([]);
+		setExtracting(false);
+		const [tasks, commands, models] = await Promise.all([window.pi.getTasks(), window.pi.getCommands(), window.pi.listModels()]);
+		if (navigation !== navigationRef.current || current?.sessionId !== activeSessionRef.current) return;
+		setTasks(tasks);
+		setCommands(commands);
+		setModels(models);
+	}, []);
 
 	const loadInto = useCallback(
 		async (loader: () => Promise<{ state: ActiveState; messages: UIMessage[]; modelFallbackMessage?: string }>) => {
+			const navigation = ++navigationRef.current;
+			navigatingRef.current = true;
 			setConvLoading(true);
+			setExtracting(false);
 			setMessages([]);
+			setTasks([]);
 			try {
 				const res = await loader();
+				if (navigation !== navigationRef.current) return;
+				activeSessionRef.current = res.state.sessionId;
+				navigatingRef.current = false;
 				setState(res.state);
 				setMessages(res.messages);
-				setTasks(await window.pi.getTasks());
+				const [nextTasks, nextCommands, nextModels] = await Promise.all([window.pi.getTasks(), window.pi.getCommands(), window.pi.listModels()]);
+				if (navigation !== navigationRef.current) return;
+				setTasks(nextTasks);
+				setCommands(nextCommands);
+				setModels(nextModels);
 				refreshUsage();
 				if (res.modelFallbackMessage) flash(res.modelFallbackMessage);
 			} catch (err) {
+				if (navigation !== navigationRef.current) return;
+				try { await syncActiveSession(navigation); }
+				catch (recoveryError) {
+					flash(`${String(err)}; could not restore the active session: ${String(recoveryError)}`);
+					return;
+				}
 				flash(err instanceof Error ? err.message : String(err));
 			} finally {
-				setConvLoading(false);
+				if (navigation === navigationRef.current) {
+					navigatingRef.current = false;
+					setConvLoading(false);
+				}
 			}
 		},
-		[flash, refreshUsage],
+		[flash, refreshUsage, syncActiveSession],
 	);
 
 	const onNew = useCallback(async () => {
@@ -279,45 +351,67 @@ export default function App() {
 				return n;
 			});
 			const currentPath = state?.sessionFile ?? (state ? `synthetic:${state.sessionId}` : undefined);
-			if (s.synthetic || s.path === currentPath) return;
+			if (s.synthetic || (s.path === currentPath && !navigatingRef.current)) return;
 			return loadInto(() => window.pi.openSession(s.path));
 		},
 		[state, loadInto],
 	);
 
-	const clearIfActive = (path: string) => {
-		if (path === state?.sessionFile) {
-			setState(null);
-			setMessages([]);
-			setTasks([]);
+	const changeHistory = useCallback(async (target: { path: string } | { cwd: string }, change: () => Promise<void>) => {
+		if (changingSessionRef.current) {
+			flash("Another session file operation is in progress.");
+			return;
 		}
-	};
+		const affectedSession = ("path" in target ? target.path === activeFileRef.current : target.cwd === state?.cwd)
+			? activeSessionRef.current : undefined;
+		const navigation = affectedSession && !navigatingRef.current ? ++navigationRef.current : navigationRef.current;
+		const restore = async () => {
+			if (affectedSession && affectedSession === activeSessionRef.current && navigation === navigationRef.current) {
+				await syncActiveSession(navigation);
+			}
+		};
+		if (affectedSession) {
+			changingSessionRef.current = affectedSession;
+			setChangingSession(affectedSession);
+			if (!navigatingRef.current) setConvLoading(false);
+		}
+		try {
+			await change();
+			await restore();
+		} catch (error) {
+			let message = error instanceof Error ? error.message : String(error);
+			try { await restore(); }
+			catch (recoveryError) { message += `; could not restore the active session: ${String(recoveryError)}`; }
+			flash(message);
+		} finally {
+			if (changingSessionRef.current === affectedSession) {
+				changingSessionRef.current = undefined;
+				setChangingSession(undefined);
+			}
+			await refreshSessions();
+		}
+	}, [state?.cwd, syncActiveSession, flash, refreshSessions]);
 
 	const onArchiveSession = useCallback(
 		async (s: SessionListItem) => {
 			if (!confirm(`Archive this session?\n\n${s.name || s.firstMessage}`)) return;
-			await window.pi.archiveSession(s.path);
-			clearIfActive(s.path);
-			refreshSessions();
+			await changeHistory({ path: s.path }, () => window.pi.archiveSession(s.path));
 		},
-		[state?.sessionFile, refreshSessions],
+		[changeHistory],
 	);
 	const onDeleteSession = useCallback(
 		async (s: SessionListItem) => {
 			if (!confirm(`Permanently delete this session? This cannot be undone.\n\n${s.name || s.firstMessage}`)) return;
-			await window.pi.deleteSession(s.path);
-			clearIfActive(s.path);
-			refreshSessions();
+			await changeHistory({ path: s.path }, () => window.pi.deleteSession(s.path));
 		},
-		[state?.sessionFile, refreshSessions],
+		[changeHistory],
 	);
 	const onDeleteFolder = useCallback(
 		async (f: { cwd: string; name: string; count: number }) => {
 			if (!confirm(`Permanently delete folder "${f.name}" and all ${f.count} session(s)? This cannot be undone.`)) return;
-			await window.pi.deleteFolder(f.cwd);
-			refreshSessions();
+			await changeHistory({ cwd: f.cwd }, () => window.pi.deleteFolder(f.cwd));
 		},
-		[refreshSessions],
+		[changeHistory],
 	);
 	const onOpenFolder = useCallback((cwd: string) => window.pi.openPath(cwd), []);
 	const onRenameFolder = useCallback(
@@ -358,14 +452,25 @@ export default function App() {
 
 	const onSetModel = useCallback(async (provider: string, id: string) => {
 		try {
-			setState(await window.pi.setModel(provider, id));
-			setModels(await window.pi.listModels());
+			assertConversationAvailable();
+			const navigation = navigationRef.current;
+			const next = await window.pi.setModel(provider, id);
+			if (navigation !== navigationRef.current) return;
+			setState(next);
+			const models = await window.pi.listModels();
+			if (navigation !== navigationRef.current) return;
+			setModels(models);
 			window.pi.getUsage().then(setUsage).catch(() => {});
 		} catch (error) { flash(error instanceof Error ? error.message : String(error)); }
-	}, [flash]);
+	}, [assertConversationAvailable, flash]);
 	const onSetThinking = useCallback(async (level: ThinkingLevel) => {
-		setState(await window.pi.setThinkingLevel(level));
-	}, []);
+		try {
+			assertConversationAvailable();
+			const navigation = navigationRef.current;
+			const next = await window.pi.setThinkingLevel(level);
+			if (navigation === navigationRef.current) setState(next);
+		} catch (error) { flash(error instanceof Error ? error.message : String(error)); }
+	}, [assertConversationAvailable, flash]);
 
 	const toggleRightPanel = useCallback(async () => {
 		setGui(await window.pi.setGuiSettings({ rightPanelOpen: !gui.rightPanelOpen }));
@@ -375,16 +480,32 @@ export default function App() {
 		[],
 	);
 
+	const changeTasks = useCallback(async (change: (sessionId: string) => Promise<Task[]>) => {
+		const navigation = navigationRef.current;
+		const sessionId = state?.sessionId;
+		try {
+			assertConversationAvailable();
+			if (convLoading || navigatingRef.current || !sessionId || sessionId !== activeSessionRef.current) {
+				throw new Error("The selected session has changed. Reopen it before updating tasks.");
+			}
+			const next = await change(sessionId);
+			if (navigation === navigationRef.current && sessionId === activeSessionRef.current) setTasks(next);
+		} catch (error) { flash(error instanceof Error ? error.message : String(error)); }
+	}, [state?.sessionId, convLoading, assertConversationAvailable, flash]);
+
 	const onExtractTasks = useCallback(async () => {
+		const navigation = navigationRef.current;
 		setExtracting(true);
 		try {
-			const r = await window.pi.extractTasks();
-			if (r.ok && r.tasks) setTasks(r.tasks);
-			else if (!r.ok && r.error) flash(r.error);
+			await changeTasks(async (sessionId) => {
+				const result = await window.pi.extractTasks(sessionId);
+				if (!result.ok || !result.tasks) throw new Error(result.error || "Task extraction failed");
+				return result.tasks;
+			});
 		} finally {
-			setExtracting(false);
+			if (navigation === navigationRef.current) setExtracting(false);
 		}
-	}, [flash]);
+	}, [changeTasks]);
 
 	// sidebar resize
 	const dragging = useRef(false);
@@ -516,8 +637,8 @@ export default function App() {
 					onRenameActive={onRenameActive}
 				/>
 				<div className="conv" style={{ ["--heipang-bg" as string]: `url(${heipangBg})` }}>
-					{convLoading ? (
-						<div className="conv-loading">Loading conversation…</div>
+					{convLoading || changingCurrentSession ? (
+						<div className="conv-loading" role="status">{changingCurrentSession ? "Updating conversation history…" : "Loading conversation…"}</div>
 					) : (
 						<MessageList messages={messages} streaming={!!state?.isStreaming} />
 					)}
@@ -527,20 +648,22 @@ export default function App() {
 					onSend={onSend}
 					onStop={() => window.pi.abort()}
 					streaming={runActive}
-					disabled={convLoading}
+					disabled={convLoading || changingCurrentSession}
 					sessionKey={state?.sessionFile ?? state?.sessionId ?? "new"}
 				/>
 			</div>
 
 			{showRight && (
 				<TaskPanel
+					key={state?.sessionId ?? "new"}
 					tasks={tasks}
+					disabled={convLoading || changingCurrentSession || !state}
 					extracting={extracting}
 					models={models}
 					state={state}
 					usage={usage}
-					onUpdate={async (t) => setTasks(await window.pi.updateTask(t))}
-					onDelete={async (id) => setTasks(await window.pi.deleteTask(id))}
+					onUpdate={(task) => changeTasks((sessionId) => window.pi.updateTask(task, sessionId))}
+					onDelete={(id) => changeTasks((sessionId) => window.pi.deleteTask(id, sessionId))}
 					onExtract={onExtractTasks}
 					onClose={toggleRightPanel}
 					onSetModel={onSetModel}
@@ -565,7 +688,7 @@ export default function App() {
 			)}
 			{memory && <MemoryEditor cwd={memory.cwd} label={memory.label} onClose={() => setMemory(null)} />}
 			{promptSpec && <PromptModal spec={promptSpec} onClose={() => setPromptSpec(null)} />}
-			{request && <RequestDialog req={request} onClose={() => setRequest(null)} />}
+			{request && <RequestDialog key={request.id} req={request} onClose={() => setRequest(null)} />}
 
 			{toast && (
 				<div className="toast" onClick={() => setToast(null)}>

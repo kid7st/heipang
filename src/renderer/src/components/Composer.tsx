@@ -8,7 +8,7 @@ interface Attachment extends ImageAttachment {
 
 // Native attachments supported by the GUI. PDF is carried through pi's current
 // image attachment channel and converted to Anthropic's document block by the
-// dependency patch in scripts/patch-pi-pdf.mjs.
+// outgoing payload hook in src/main/provider-compat.ts.
 const SUPPORTED_ATTACHMENT_MIME = new Set(["image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf"]);
 const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "gif", "webp"]);
 const PDF_EXTS = new Set(["pdf"]);

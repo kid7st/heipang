@@ -1,7 +1,8 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { Worker } from "node:worker_threads";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { clipboard, nativeImage } from "electron";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import {
@@ -17,19 +18,18 @@ import type { AuthPrompt, Model } from "@earendil-works/pi-ai";
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai/compat";
 import { convertPdfAttachments } from "./provider-compat.js";
 import { measuredStream } from "./request-stream.js";
-import antigravityExtension, {
-	applyAntigravityCatalog,
-	discoverAntigravityModels,
-	fetchAccountUsage,
-	getCurrentAntigravityCatalog,
-} from "./antigravity/index.js";
+import type { InputBridge } from "./input-requests.js";
+import { createExtensionUI } from "./extension-ui.js";
+import { SessionTasks } from "./session-tasks.js";
+import type { SessionIndexResult } from "./session-index-worker.js";
+import { ModelCatalog } from "./model-catalog.js";
+import { createPersistentModelRuntime, unresolvedCredentialErrors } from "./model-runtime.js";
+import { fetchAccountUsage } from "./antigravity/index.js";
 import { antigravityProvider } from "./antigravity/provider.js";
 import { streamAntigravity } from "./antigravity/stream/index.js";
-import antigravitySearch from "./antigravity/features/google-search.js";
-import antigravityImage from "./antigravity/features/generate-image.js";
 import { hasRelayConfiguration } from "./antigravity/client/relay.js";
 import { AntigravitySettingsStore } from "./antigravity-settings.js";
-import { preferBuiltinAntigravity } from "./builtin-antigravity.js";
+import { createSessionResources, loadSessionResources } from "./session-resources.js";
 import type {
 	AccountInfo,
 	AntigravitySettingsInput,
@@ -48,14 +48,7 @@ import type {
 	ThinkingLevel,
 	UIMessage,
 	UsageInfo,
-	WorkspaceInfo,
 } from "../shared/types.js";
-
-export interface OAuthBridge {
-	openExternal: (url: string) => void;
-	requestInput: (kind: string, payload: unknown) => Promise<string | undefined>;
-	dismissInputs: () => void;
-}
 
 const BUILTIN_COMMANDS: CommandInfo[] = [
 	{ name: "usage", description: "Show this account's usage (5h / 7d limits)", source: "builtin" },
@@ -73,17 +66,9 @@ const DEFAULT_GUI_SETTINGS: GuiSettings = {
 	sidebarCollapsed: false,
 };
 
-// Anthropic gates new models on the Claude Code client version pi announces.
-// pi 0.85 hardcodes an older one, so HEIPANG sends its own and raises it
-// automatically when Anthropic asks for a newer client.
+// Retain version-gate recovery until its original failure is verified against the bundled SDK.
 const DEFAULT_CLAUDE_CODE_VERSION = "2.1.280";
 const CLAUDE_CODE_VERSION_REQUIRED = /version (\d+\.\d+\.\d+) or newer is required/i;
-
-const MAX_TASK_LEN = 20;
-function capTitle(s: string): string {
-	const t = s.trim().replace(/\s+/g, " ");
-	return t.length > MAX_TASK_LEN ? t.slice(0, MAX_TASK_LEN) : t;
-}
 
 type AnyModel = Model<any>;
 
@@ -168,74 +153,29 @@ function guardManyImageContext(messages: AgentMessage[]): AgentMessage[] {
 	});
 }
 
-// ---- Model recency + remote "latest models" catalog ---------------------
-// Users shouldn't hand-manage models. We surface only "recent" models
-// (Anthropic >= 4.7, OpenAI >= 5.5) and pull the newest ones from a small
-// remote catalog that refreshes on a weekly cadence (providers ship new models
-// roughly quarterly), so a new model shows up within a week with no reinstall
-// and with a correct context window.
-interface CatalogModel {
-	provider: string;
-	id: string;
-	name?: string;
-	reasoning?: boolean;
-	contextWindow?: number;
-	maxTokens?: number;
-}
-// Codex only returns its newest models when the caller looks like a current CLI.
-const CODEX_CLIENT_VERSION = "0.170.0";
-const ANTHROPIC_FLOOR: [number, number] = [4, 7];
-const OPENAI_FLOOR: [number, number] = [5, 5];
-function anthropicVer(id: string): [number, number] {
-	const s = id.replace(/^claude-/, "").replace(/-\d{8}$/, "").replace(/-latest$/, "");
-	const nums = (s.match(/\d+/g) ?? []).map(Number);
-	if (nums.length === 0) return [99, 0]; // unknown/new family → treat as newest
-	return [nums[0], nums[1] ?? 0];
-}
-function openaiVer(id: string): [number, number] {
-	const m = id.match(/gpt-(\d+)(?:\.(\d+))?/i);
-	if (!m) return [99, 0];
-	return [Number(m[1]), Number(m[2] ?? 0)];
-}
-function verGte(v: [number, number], floor: [number, number]): boolean {
-	return v[0] > floor[0] || (v[0] === floor[0] && v[1] >= floor[1]);
-}
-function verCmpDesc(a: [number, number], b: [number, number]): number {
-	return b[0] - a[0] || b[1] - a[1];
-}
-function isRecentAnthropic(id: string): boolean {
-	return verGte(anthropicVer(id), ANTHROPIC_FLOOR);
-}
-function usesAdaptiveAnthropicThinking(id: string): boolean {
-	const [major, minor] = anthropicVer(id);
-	if (/fable/.test(id)) return major >= 5;
-	if (/opus|sonnet/.test(id)) return major >= 5 || (major === 4 && minor >= 6);
-	return false;
-}
-function isRecentOpenAI(id: string): boolean {
-	return verGte(openaiVer(id), OPENAI_FLOOR);
-}
-function anthropicDefaultCtx(id: string): number {
-	const [maj, min] = anthropicVer(id);
-	if (/opus|sonnet/.test(id) && (maj > 4 || (maj === 4 && min >= 6))) return 1_000_000;
-	return 200_000;
+type SessionNavigation = {
+	cwd?: string;
+	path?: string;
+	controller: AbortController;
+	opening?: Promise<OpenSessionResult>;
+};
+
+function sessionFileKey(path: string): string {
+	try { return realpathSync(path); }
+	catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+		return resolve(path);
+	}
 }
 
-/**
- * Owns all pi SDK state in the main process. One driver per app.
- * Heavy work (parsing big session files, registry refresh) happens here so the
- * renderer never blocks.
- */
 export class Driver {
 	readonly agentDir: string;
-	// pi 0.85 replaced AuthStorage + ModelRegistry with the async ModelRuntime,
-	// so the runtime is created lazily and awaited by every consumer.
 	private modelRuntimePromise: Promise<ModelRuntime>;
-	private modelRuntimeResolved?: ModelRuntime;
+	private credentialRevisions = new Map<string, symbol>();
 	private providerWarmupPromise?: Promise<void>;
 	private settings: SettingsManager;
 
-	private resourceLoader: DefaultResourceLoader;
+	private catalogLoader: DefaultResourceLoader;
 	private guiSettings: GuiSettings;
 
 	private session?: AgentSession;
@@ -244,18 +184,26 @@ export class Driver {
 	// SessionManager.listAll() parses every JSONL (including image base64). Cache
 	// the result so startup/event bursts never rescan hundreds of MB repeatedly.
 	private sessionListCache?: SessionListItem[];
-	private sessionListInflight?: Promise<SessionListItem[]>;
+	private sessionListInflight?: Promise<SessionIndexResult>;
 	private sessionIndexWorker?: Worker;
 	private contextCache?: { sessionId: string; value: number | undefined };
 	private lastStateKey = "";
 
-	// task state for the active session
-	private savedTasks: Task[] = [];
-	private taskCounter = 0;
-	private extractTimer?: ReturnType<typeof setTimeout>;
-	private extracting = false;
-	private lastExtractUserCount = -1;
-	oauthBridge?: OAuthBridge;
+	private sessionTasks = new WeakMap<AgentSession, SessionTasks>();
+	private sessionControllers = new Map<AgentSession, AbortController>();
+	private sessionOperations = new WeakMap<AgentSession, Set<Promise<unknown>>>();
+	private sessionShutdownErrors = new WeakMap<AgentSession, unknown[]>();
+	private shutdownController = new AbortController();
+	private releasingSessions = new WeakMap<AgentSession, Promise<void>>();
+	private navigationSequence = 0;
+	private navigation?: SessionNavigation;
+	private pendingNavigations = new Set<SessionNavigation>();
+	private fileMutation?: { cwd?: string; path?: string; done?: Promise<void> };
+	private closing = false;
+	private shutdownErrors: Error[] = [];
+	private shutdownPromise?: Promise<void>;
+	oauthBridge?: InputBridge;
+	private loginController?: AbortController;
 
 	private claudeCodeVersion = DEFAULT_CLAUDE_CODE_VERSION;
 
@@ -269,10 +217,10 @@ export class Driver {
 	private usageInflight = new Map<string, Promise<UsageInfo>>();
 	private static readonly USAGE_TTL = 60_000;
 
-	private onMessages?: (messages: UIMessage[]) => void;
-	private onMessagesPatch?: (from: number, messages: UIMessage[]) => void;
+	private onMessages?: (messages: UIMessage[], sessionId: string) => void;
+	private onMessagesPatch?: (from: number, messages: UIMessage[], sessionId: string) => void;
 	private onState?: (state: ActiveState) => void;
-	private onTasks?: (tasks: Task[]) => void;
+	private onTasks?: (tasks: Task[], sessionId: string) => void;
 	private onSessionUpdated?: (path?: string) => void;
 	private onRunComplete?: (path?: string) => void;
 	private onError?: (message: string) => void;
@@ -297,12 +245,7 @@ export class Driver {
 	// provider/agent emits its final error event. Cleared by the next user send.
 	private cancelledRuns = new Set<string>();
 
-	// Remote "latest models" catalog (weekly stale-while-revalidate refresh).
-	private catalogMem?: { fetchedAt: number; models: CatalogModel[] };
-	private catalogInflight?: Promise<CatalogModel[]>;
-	private static readonly CATALOG_TTL = 7 * 24 * 60 * 60 * 1000;
-	private static readonly CATALOG_URL =
-		"https://raw.githubusercontent.com/kuaai/heipang-releases/main/models-catalog.json";
+	private catalog: ModelCatalog;
 
 	private antigravitySettings: AntigravitySettingsStore;
 
@@ -310,30 +253,19 @@ export class Driver {
 		this.agentDir = getAgentDir();
 		this.antigravitySettings = new AntigravitySettingsStore(this.agentDir);
 		this.modelRuntimePromise = this.createModelRuntime();
-		this.settings = SettingsManager.create(homedir(), this.agentDir);
-		// Bound recovery per application without changing shared CLI settings.
-		const retrySettings = this.settings.getRetrySettings.bind(this.settings);
-		this.settings.getRetrySettings = () => {
-			const policy = retrySettings();
-			return { ...policy, maxRetries: Math.min(policy.maxRetries, 2) };
-		};
-		this.settings.getHttpIdleTimeoutMs = () => 120_000;
-		this.resourceLoader = new DefaultResourceLoader({
-			cwd: homedir(),
-			agentDir: this.agentDir,
-			settingsManager: this.settings,
-			extensionFactories: [antigravityExtension, antigravitySearch, antigravityImage],
-			extensionsOverride: preferBuiltinAntigravity,
-		});
+		const resources = createSessionResources(homedir(), this.agentDir);
+		this.settings = resources.settingsManager;
+		this.catalogLoader = resources.resourceLoader;
+		this.catalog = new ModelCatalog(this.agentDir, () => this.runtime(), this.settings, this.shutdownController.signal);
 		this.guiSettings = this.loadGuiSettings();
-		void this.loadCatalog().catch(() => {}); // warm the latest-models cache on startup
+		void this.catalog.loadCatalog();
 	}
 
 	setHandlers(handlers: {
-		onMessages: (messages: UIMessage[]) => void;
-		onMessagesPatch: (from: number, messages: UIMessage[]) => void;
+		onMessages: (messages: UIMessage[], sessionId: string) => void;
+		onMessagesPatch: (from: number, messages: UIMessage[], sessionId: string) => void;
 		onState: (state: ActiveState) => void;
-		onTasks: (tasks: Task[]) => void;
+		onTasks: (tasks: Task[], sessionId: string) => void;
 		onSessionUpdated: (path?: string) => void;
 		onRunComplete: (path?: string) => void;
 		onError: (message: string) => void;
@@ -352,12 +284,13 @@ export class Driver {
 	// --------------------------------------------------------- resources/settings
 
 	async getResources(): Promise<ResourcesPayload> {
-		await this.resourceLoader.reload();
-		const ext = this.resourceLoader.getExtensions();
-		const skillsRes = this.resourceLoader.getSkills();
+		if (!this.session) await this.warmExtensionProviders();
+		const resourceLoader = this.session?.resourceLoader ?? this.catalogLoader;
+		const ext = resourceLoader.getExtensions();
+		const skillsRes = resourceLoader.getSkills();
 		const errByPath = new Map(ext.errors.map((e) => [e.path, e.error]));
 		return {
-			extensions: ext.extensions.map((e) => ({
+			extensions: ext.extensions.filter((e) => !isAbsolute(e.resolvedPath) || existsSync(e.resolvedPath)).map((e) => ({
 				name: basename(e.path).replace(/\.[tj]s$/, ""),
 				path: e.path,
 				tools: [...e.tools.keys()],
@@ -368,7 +301,7 @@ export class Driver {
 					.filter((er) => !ext.extensions.some((e) => e.path === er.path))
 					.map((er) => ({ name: basename(er.path).replace(/\.[tj]s$/, ""), path: er.path, tools: [], commands: [], error: er.error })),
 			),
-			skills: skillsRes.skills.map((s) => ({ name: s.name, description: s.description, filePath: s.filePath })),
+			skills: skillsRes.skills.filter((s) => existsSync(s.filePath)).map((s) => ({ name: s.name, description: s.description, filePath: s.filePath })),
 			skillDiagnostics: skillsRes.diagnostics.map((d) => ({ type: d.type, message: d.message, path: d.path })),
 			extensionsDir: join(this.agentDir, "extensions"),
 			skillsDir: join(this.agentDir, "skills"),
@@ -389,6 +322,11 @@ export class Driver {
 		if (partial.steeringMode) this.settings.setSteeringMode(partial.steeringMode);
 		if (partial.followUpMode) this.settings.setFollowUpMode(partial.followUpMode);
 		await this.settings.flush();
+		for (const session of this.liveSessions()) {
+			await session.settingsManager.reload();
+			if (partial.steeringMode) session.setSteeringMode(partial.steeringMode);
+			if (partial.followUpMode) session.setFollowUpMode(partial.followUpMode);
+		}
 		return this.getPiSettings();
 	}
 
@@ -419,54 +357,39 @@ export class Driver {
 	// ---------------------------------------------------------------- models
 
 	private async createModelRuntime(): Promise<ModelRuntime> {
-		const runtime = await ModelRuntime.create({
-			authPath: join(this.agentDir, "auth.json"),
-			modelsPath: join(this.agentDir, "models.json"),
-			allowModelNetwork: false, // keep startup offline-fast; catalogs are refreshed separately
-		});
+		const runtime = await createPersistentModelRuntime(this.agentDir, this.shutdownController.signal, this.credentialRevisions);
 		runtime.registerNativeProvider(antigravityProvider(streamAntigravity));
 		// Override shared OAuth credentials in memory without changing CLI authentication.
 		if (hasRelayConfiguration()) await runtime.setRuntimeApiKey("antigravity", "heipang-relay");
 		return runtime;
 	}
 
-	/** The shared model/auth runtime. Created once, rebuilt after models.json writes. */
+	/** Catalog and account operations must not register providers into live sessions. */
 	private async runtime(): Promise<ModelRuntime> {
-		if (!this.modelRuntimeResolved) this.modelRuntimeResolved = await this.modelRuntimePromise;
-		return this.modelRuntimeResolved;
+		this.shutdownController.signal.throwIfAborted();
+		const runtime = await this.modelRuntimePromise;
+		this.shutdownController.signal.throwIfAborted();
+		return runtime;
 	}
 
-	/** ModelRuntime snapshots models.json at creation, so reload it after writes. */
-	private reloadModelRuntime(): void {
-		this.modelRuntimeResolved = undefined;
-		this.modelRuntimePromise = this.createModelRuntime();
-		this.providerWarmupPromise = undefined; // re-register extension providers
-	}
-
-	/**
-	 * Extension providers (e.g. Antigravity/Gemini) register into the shared
-	 * ModelRuntime only when an agent session binds its extensions. HEIPANG defers
-	 * session creation, so without this warm-up the provider would be invisible in
-	 * Accounts and the model picker until the user opened a conversation. Bind once
-	 * against a disposable in-memory session; registrations persist in the runtime.
-	 */
+	// Register account-level providers without firing session lifecycle hooks.
 	private async warmExtensionProviders(): Promise<void> {
+		this.shutdownController.signal.throwIfAborted();
 		if (this.providerWarmupPromise) return this.providerWarmupPromise;
 		this.providerWarmupPromise = (async () => {
-			// Load extension factories first; provider registrations queue here and are
-			// flushed into the ModelRuntime by the session bind below.
-			await this.resourceLoader.reload();
+			await this.catalogLoader.reload();
 			const { session } = await createAgentSession({
 				agentDir: this.agentDir,
 				cwd: homedir(),
 				modelRuntime: await this.runtime(),
 				settingsManager: this.settings,
-				resourceLoader: this.resourceLoader,
+				resourceLoader: this.catalogLoader,
 				sessionManager: SessionManager.inMemory(),
 			});
 			session.dispose();
-		})().catch(() => {
-			this.providerWarmupPromise = undefined; // allow a later retry
+		})().catch((error) => {
+			this.providerWarmupPromise = undefined;
+			this.onError?.(`Could not load extension providers: ${error instanceof Error ? error.message : String(error)}`);
 		});
 		return this.providerWarmupPromise;
 	}
@@ -487,7 +410,7 @@ export class Driver {
 	async listModels(): Promise<ModelsPayload> {
 		await this.settings.reload();
 		await this.warmExtensionProviders();
-		const runtime = await this.runtime();
+		const runtime = this.session?.modelRuntime ?? await this.runtime();
 		const availableModels = await runtime.getAvailable();
 		const availableKeys = new Set(availableModels.map((m) => `${m.provider}/${m.id}`));
 		const all = runtime
@@ -504,96 +427,13 @@ export class Driver {
 		};
 	}
 
-	private readModelsJson(): any {
-		const p = join(this.agentDir, "models.json");
-		if (!existsSync(p)) return { providers: {} };
-		try {
-			const data = JSON.parse(readFileSync(p, "utf8"));
-			if (!data.providers) data.providers = {};
-			return data;
-		} catch {
-			return { providers: {} };
-		}
-	}
-
-	private writeModelsJson(data: any): void {
-		const p = join(this.agentDir, "models.json");
-		writeFileSync(p, `${JSON.stringify(data, null, 2)}\n`, "utf8");
-		this.reloadModelRuntime();
+	private liveSessions(): AgentSession[] {
+		return [...(this.session ? [this.session] : []), ...[...this.bgSessions.values()].map((entry) => entry.session)];
 	}
 
 	async addModels(models: NewModelInput[]): Promise<ModelsPayload> {
-		const data = this.readModelsJson();
-		for (const m of models) {
-			if (!data.providers[m.provider]) data.providers[m.provider] = { models: [] };
-			const prov = data.providers[m.provider];
-			if (!Array.isArray(prov.models)) prov.models = [];
-			const idx = prov.models.findIndex((x: any) => x.id === m.id);
-			const entry: any = {
-				id: m.id,
-				name: m.name,
-				reasoning: m.reasoning,
-				input: ["text", "image"],
-				contextWindow: m.contextWindow,
-				maxTokens: m.maxTokens,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			};
-			// Provider-specific wiring so new models work AND xhigh stays selectable.
-			if (m.provider === "anthropic" && m.reasoning) {
-				entry.thinkingLevelMap = { xhigh: "xhigh" };
-				if (usesAdaptiveAnthropicThinking(m.id)) {
-					// Used by newer pi-ai releases; the bundled release is patched at
-					// build time with the equivalent model-ID recognition.
-					entry.compat = { forceAdaptiveThinking: true, supportsTemperature: false };
-				}
-			} else if (m.provider === "deepseek") {
-				const catalog = (await this.runtime()).getModel("deepseek", m.id);
-				entry.api = "openai-completions";
-				entry.baseUrl = "https://api.deepseek.com";
-				if (catalog) {
-					entry.compat = catalog.compat;
-					entry.thinkingLevelMap = catalog.thinkingLevelMap;
-					entry.cost = catalog.cost;
-				}
-				// V4 Pro is text-only. Retain reasoning_content across tool turns;
-				// sending an image or dropping reasoning makes the API reject a turn.
-				if (m.id === "deepseek-v4-pro") entry.input = ["text"];
-			} else if (m.provider === "antigravity") {
-				const catalog: any =
-					(await this.runtime()).getModel("antigravity", m.id) ??
-					getCurrentAntigravityCatalog().models.find((cm) => cm.id === m.id);
-				entry.api = "antigravity-api";
-				entry.baseUrl = "https://daily-cloudcode-pa.googleapis.com";
-				if (catalog) {
-					if (catalog.thinkingLevelMap) entry.thinkingLevelMap = catalog.thinkingLevelMap;
-					if (catalog.contextWindow) entry.contextWindow = catalog.contextWindow;
-					if (catalog.maxTokens) entry.maxTokens = catalog.maxTokens;
-					if (catalog.cost) entry.cost = catalog.cost;
-					if (catalog.input) entry.input = catalog.input;
-				}
-			} else if (m.provider === "openai-codex") {
-				entry.api = "openai-codex-responses";
-				entry.baseUrl = "https://chatgpt.com/backend-api";
-				if (m.reasoning) entry.thinkingLevelMap = { off: null, xhigh: "xhigh" };
-			}
-			if (idx >= 0) prov.models[idx] = { ...prov.models[idx], ...entry };
-			else prov.models.push(entry);
-		}
-		this.writeModelsJson(data);
-		return this.listModels();
-	}
-
-	async removeModel(provider: string, id: string): Promise<ModelsPayload> {
-		const data = this.readModelsJson();
-		const prov = data.providers?.[provider];
-		if (prov?.models) {
-			prov.models = prov.models.filter((x: any) => x.id !== id);
-		}
-		this.writeModelsJson(data);
-		// also drop from enabled
-		const enabled = (this.settings.getEnabledModels() ?? []).filter((e) => e !== `${provider}/${id}`);
-		this.settings.setEnabledModels(enabled);
-		await this.settings.flush();
+		await this.catalog.addModels(models);
+		await Promise.all(this.liveSessions().map((session) => session.modelRuntime.refresh({ allowNetwork: false })));
 		return this.listModels();
 	}
 
@@ -611,285 +451,20 @@ export class Driver {
 
 	// -------- Remote model catalog (weekly-refreshed "latest models") --------
 
-	private catalogCachePath(): string {
-		return join(this.agentDir, "models-catalog.cache.json");
-	}
-	private readCatalogCache(): { fetchedAt: number; models: CatalogModel[] } | null {
-		if (this.catalogMem) return this.catalogMem;
-		try {
-			const d = JSON.parse(readFileSync(this.catalogCachePath(), "utf8"));
-			if (d && Array.isArray(d.models)) {
-				this.catalogMem = { fetchedAt: Number(d.fetchedAt) || 0, models: d.models };
-				return this.catalogMem;
-			}
-		} catch {
-			/* no cache yet */
-		}
-		return null;
-	}
-	private async fetchCatalogRemote(): Promise<CatalogModel[]> {
-		const res = await fetch(`${Driver.CATALOG_URL}?t=${Date.now()}`, { cache: "no-store" } as any);
-		if (!res.ok) throw new Error(`HTTP ${res.status}`);
-		const json: any = await res.json();
-		const models: CatalogModel[] = Array.isArray(json?.models)
-			? json.models.filter((m: any) => m && typeof m.provider === "string" && typeof m.id === "string")
-			: [];
-		const rec = { fetchedAt: Date.now(), models };
-		this.catalogMem = rec;
-		try {
-			writeFileSync(this.catalogCachePath(), `${JSON.stringify(rec, null, 2)}\n`, "utf8");
-		} catch {
-			/* ignore */
-		}
-		return models;
-	}
-	/** Latest-model catalog. Serves cache instantly and refreshes in the
-	 * background when older than a week (providers ship models ~quarterly), so
-	 * new models arrive with no reinstall. `force` awaits a fresh pull. */
-	async loadCatalog(force = false): Promise<CatalogModel[]> {
-		const cache = this.readCatalogCache();
-		const fresh = cache && Date.now() - cache.fetchedAt < Driver.CATALOG_TTL;
-		if (fresh && !force) return cache!.models;
-		const doFetch = () => {
-			if (!this.catalogInflight) {
-				this.catalogInflight = this.fetchCatalogRemote().finally(() => {
-					this.catalogInflight = undefined;
-				});
-			}
-			return this.catalogInflight;
-		};
-		if (cache && !force) {
-			doFetch().catch(() => {}); // stale-while-revalidate
-			return cache.models;
-		}
-		try {
-			return await doFetch();
-		} catch {
-			return cache?.models ?? [];
-		}
-	}
 	async refreshModelCatalog(): Promise<{ ok: boolean; count?: number; error?: string }> {
-		try {
-			const models = await this.loadCatalog(true);
-			return { ok: true, count: models.length };
-		} catch (err) {
-			return { ok: false, error: err instanceof Error ? err.message : String(err) };
-		}
+		return this.catalog.refreshModelCatalog();
 	}
 
-	/** Anthropic: live account model list (/v1/models), limited to recent models
-	 * (>= 4.7) and enriched with context windows from the remote catalog. */
 	async fetchRemoteModels(): Promise<{ ok: boolean; models?: RemoteModel[]; error?: string }> {
-		try {
-			const token = await this.providerApiKey("anthropic");
-			if (!token) return { ok: false, error: "No anthropic auth found in auth.json" };
-			const res = await fetch("https://api.anthropic.com/v1/models?limit=1000", {
-				headers: {
-					Authorization: `Bearer ${token}`,
-					"anthropic-version": "2023-06-01",
-					"anthropic-beta": "oauth-2025-04-20",
-				},
-			});
-			if (!res.ok) {
-				const body = await res.text().catch(() => "");
-				return { ok: false, error: `HTTP ${res.status}: ${body.slice(0, 300)}` };
-			}
-			const json = (await res.json()) as {
-				data?: Array<{
-					id: string;
-					display_name?: string;
-					created_at?: string;
-					max_input_tokens?: number;
-					max_tokens?: number;
-					capabilities?: { thinking?: { supported?: boolean } };
-				}>;
-			};
-			const catalog = await this.loadCatalog();
-			const cat = new Map(catalog.filter((c) => c.provider === "anthropic").map((c) => [c.id, c] as const));
-			// "Already added" = already ENABLED (in the chat dropdown), not merely
-			// present in the registry/bundled catalog — otherwise bundled models can
-			// never be enabled from here (their checkbox would be disabled).
-			const enabled = new Set(this.settings.getEnabledModels() ?? []);
-			const models: RemoteModel[] = (json.data ?? [])
-				.filter((d) => isRecentAnthropic(d.id))
-				.map((d) => {
-					const c = cat.get(d.id);
-					return {
-						id: d.id,
-						display_name: d.display_name ?? d.id,
-						created_at: d.created_at,
-						provider: "anthropic",
-						reasoning: d.capabilities?.thinking?.supported ?? c?.reasoning ?? true,
-						contextWindow: d.max_input_tokens ?? c?.contextWindow ?? anthropicDefaultCtx(d.id),
-						maxTokens: d.max_tokens ?? c?.maxTokens ?? 128000,
-						alreadyAdded: enabled.has(`anthropic/${d.id}`),
-					};
-				})
-				.sort(
-					(a, b) =>
-						(b.created_at ?? "").localeCompare(a.created_at ?? "") ||
-						verCmpDesc(anthropicVer(a.id), anthropicVer(b.id)),
-				);
-			return { ok: true, models };
-		} catch (err) {
-			return { ok: false, error: err instanceof Error ? err.message : String(err) };
-		}
+		return this.catalog.fetchRemoteModels();
 	}
 
-	/** Live Codex model list. The ChatGPT backend exposes the same endpoint the
-	 * Codex CLI uses, and it is the only authoritative source for a model's real
-	 * context window. Guessed windows are dangerous: an inflated value disables
-	 * auto-compaction until the provider rejects the request outright. */
-	private async fetchCodexModelsLive(): Promise<Map<string, CatalogModel & { hidden?: boolean }>> {
-		const out = new Map<string, CatalogModel & { hidden?: boolean }>();
-		try {
-			const apiKey = await this.providerApiKey("openai-codex");
-			if (!apiKey) return out;
-			const accountId = this.decodeJwt(apiKey)?.["https://api.openai.com/auth"]?.chatgpt_account_id;
-			if (!accountId) return out;
-			const res = await fetch(`https://chatgpt.com/backend-api/codex/models?client_version=${CODEX_CLIENT_VERSION}`, {
-				headers: {
-					Accept: "application/json",
-					Authorization: `Bearer ${apiKey}`,
-					"chatgpt-account-id": accountId,
-					originator: "pi",
-				},
-				signal: AbortSignal.timeout(10000),
-			});
-			if (!res.ok) return out;
-			const json: any = await res.json();
-			for (const m of json?.models ?? []) {
-				if (!m?.slug) continue;
-				// `context_window` is only the Codex CLI's default truncation point, not a
-				// hard limit: GPT-5.6 Sol has completed turns well past it. Use the larger
-				// `max_context_window` so auto-compaction does not fire hundreds of
-				// thousands of tokens early.
-				const window =
-					typeof m.max_context_window === "number" && m.max_context_window > (m.context_window ?? 0)
-						? m.max_context_window
-						: m.context_window;
-				out.set(m.slug, {
-					provider: "openai-codex",
-					id: m.slug,
-					name: m.title || m.slug,
-					reasoning: Array.isArray(m.supported_reasoning_levels) ? m.supported_reasoning_levels.length > 0 : true,
-					contextWindow: typeof window === "number" ? window : undefined,
-					maxTokens: typeof m.max_output_tokens === "number" ? m.max_output_tokens : undefined,
-					hidden: m.visibility === "hide",
-				});
-			}
-		} catch {
-			/* offline or signed out — fall back to the bundled/remote catalog */
-		}
-		return out;
-	}
-
-	/** OpenAI (ChatGPT/Codex): merges pi-ai's bundled catalog and the remote
-	 * catalog, then overlays the live Codex model list (authoritative names and
-	 * context windows), limited to recent models (>= 5.5). */
 	async fetchRemoteOpenAIModels(): Promise<{ ok: boolean; models?: RemoteModel[]; error?: string }> {
-		try {
-			const catalog = await this.loadCatalog();
-			const bundled = ((await this.runtime()).getModels("openai-codex") as AnyModel[]) ?? [];
-			const map = new Map<string, RemoteModel>();
-			for (const m of bundled) {
-				map.set(m.id, {
-					id: m.id,
-					display_name: m.name ?? m.id,
-					provider: "openai-codex",
-					reasoning: !!m.reasoning,
-					contextWindow: m.contextWindow,
-					maxTokens: m.maxTokens,
-					alreadyAdded: false,
-				});
-			}
-			for (const c of catalog) {
-				if (c.provider !== "openai-codex") continue;
-				map.set(c.id, {
-					id: c.id,
-					display_name: c.name ?? c.id,
-					provider: "openai-codex",
-					reasoning: c.reasoning ?? true,
-					contextWindow: c.contextWindow ?? 272000,
-					maxTokens: c.maxTokens ?? 128000,
-					alreadyAdded: false,
-				});
-			}
-			// Live values win: a wrong context window silently breaks compaction.
-			for (const [id, live] of await this.fetchCodexModelsLive()) {
-				if (live.hidden && !map.has(id)) continue;
-				const current = map.get(id);
-				map.set(id, {
-					id,
-					display_name: live.name ?? current?.display_name ?? id,
-					provider: "openai-codex",
-					reasoning: live.reasoning ?? current?.reasoning ?? true,
-					contextWindow: live.contextWindow ?? current?.contextWindow ?? 272000,
-					maxTokens: live.maxTokens ?? current?.maxTokens ?? 128000,
-					alreadyAdded: false,
-				});
-			}
-			// "Already added" = already ENABLED (see the Anthropic method) so bundled
-			// models (e.g. gpt-5.5) stay selectable until you actually enable them.
-			const enabled = new Set(this.settings.getEnabledModels() ?? []);
-			const models: RemoteModel[] = [...map.values()]
-				.filter((m) => isRecentOpenAI(m.id))
-				.map((m) => ({ ...m, alreadyAdded: enabled.has(`openai-codex/${m.id}`) }))
-				.sort((a, b) => verCmpDesc(openaiVer(a.id), openaiVer(b.id)) || a.id.localeCompare(b.id));
-			if (models.length === 0) return { ok: false, error: "No recent OpenAI models found (try Refresh)" };
-			return { ok: true, models };
-		} catch (err) {
-			return { ok: false, error: err instanceof Error ? err.message : String(err) };
-		}
+		return this.catalog.fetchRemoteOpenAIModels();
 	}
 
-	/** Antigravity: dynamic model discovery via Cloud Code API, falling back
-	 * to the bundled catalog when offline or signed out. */
 	async fetchRemoteAntigravityModels(): Promise<{ ok: boolean; models?: RemoteModel[]; error?: string }> {
-		try {
-			const enabled = new Set(this.settings.getEnabledModels() ?? []);
-			let catalogModels: Array<{ id: string; name?: string; reasoning?: boolean; contextWindow?: number; maxTokens?: number }> = [];
-			const apiKey = await this.providerApiKey("antigravity");
-			if (apiKey) {
-				try {
-					const discovered = await discoverAntigravityModels(apiKey);
-					if (discovered.models.length > 0) {
-						applyAntigravityCatalog(discovered);
-						catalogModels = discovered.models.map((m: any) => ({
-							id: m.id,
-							name: m.name ?? m.id,
-							reasoning: m.reasoning ?? true,
-							contextWindow: m.contextWindow ?? 1048576,
-							maxTokens: m.maxTokens ?? 65536,
-						}));
-					}
-				} catch {
-					/* fallback to static catalog on failure */
-				}
-			}
-			if (catalogModels.length === 0) {
-				const fallback = getCurrentAntigravityCatalog();
-				catalogModels = fallback.models.map((m: any) => ({
-					id: m.id,
-					name: m.name ?? m.id,
-					reasoning: "reasoning" in m ? (m as any).reasoning : true,
-					contextWindow: "contextWindow" in m ? (m as any).contextWindow : 1048576,
-					maxTokens: "maxTokens" in m ? (m as any).maxTokens : 65536,
-				}));
-			}
-			const models: RemoteModel[] = catalogModels.map((m) => ({
-				id: m.id,
-				display_name: m.name ?? m.id,
-				provider: "antigravity",
-				reasoning: m.reasoning ?? true,
-				contextWindow: m.contextWindow ?? 1048576,
-				maxTokens: m.maxTokens ?? 65536,
-				alreadyAdded: enabled.has(`antigravity/${m.id}`),
-			}));
-			return { ok: true, models };
-		} catch (err) {
-			return { ok: false, error: err instanceof Error ? err.message : String(err) };
-		}
+		return this.catalog.fetchRemoteAntigravityModels();
 	}
 
 	// -------------------------------------------------------------- sessions
@@ -898,83 +473,116 @@ export class Driver {
 		return join(this.agentDir, "sessions-archived");
 	}
 
-	async archiveSession(path: string): Promise<void> {
-		if (!existsSync(path)) return;
-		this.invalidateSessionList();
-		const sessionsRoot = join(this.agentDir, "sessions");
-		const rel = path.startsWith(sessionsRoot) ? path.slice(sessionsRoot.length + 1) : basename(path);
-		const dest = join(this.archiveDir(), rel);
-		mkdirSync(dirname(dest), { recursive: true });
-		renameSync(path, dest);
-		if (this.session?.sessionFile === path) this.disposeSession();
-		this.killBackground(path);
+	private assertSessionAvailable(cwd?: string, path?: string): void {
+		if (this.closing) throw new Error("The application is closing");
+		if ((this.fileMutation?.path && path && sessionFileKey(path) === this.fileMutation.path)
+			|| (this.fileMutation?.cwd && cwd && resolve(cwd) === this.fileMutation.cwd)) {
+			throw new Error("This session is being deleted or archived. Wait for the operation to finish.");
+		}
 	}
 
-	/** Stop + drop a background run (used when its session is deleted/archived). */
-	private killBackground(path: string): void {
+	private async mutateSessionFiles(scope: { cwd: string } | { path: string }, mutate: () => void | Promise<void>): Promise<void> {
+		this.assertSessionAvailable();
+		if (this.fileMutation) throw new Error("Another session file operation is in progress.");
+		const target = "cwd" in scope ? { cwd: resolve(scope.cwd) } : { path: sessionFileKey(scope.path) };
+		const matches = (cwd: string | undefined, path?: string) => "cwd" in target
+			? !!cwd && resolve(cwd) === target.cwd : !!path && sessionFileKey(path) === target.path;
+		const activeMatches = this.session && matches(this.session.sessionManager.getCwd(), this.session.sessionFile);
+		const navigationMatches = this.navigation && matches(this.navigation.cwd, this.navigation.path);
+		const pending = [...this.pendingNavigations].filter((navigation) => matches(navigation.cwd, navigation.path));
+		const mutation: NonNullable<Driver["fileMutation"]> = target;
+		this.fileMutation = mutation;
+		if (navigationMatches) this.cancelNavigation();
+		for (const navigation of pending) navigation.controller.abort(new Error("Session navigation was superseded"));
+		const operation = (async () => {
+			try {
+				if (activeMatches) await this.disposeSession();
+				for (const [path, bg] of this.bgSessions) {
+					if (matches(bg.session.sessionManager.getCwd(), path)) await this.killBackground(path);
+				}
+				for (const navigation of pending) {
+					try { await navigation.opening; }
+					catch (error) {
+						if (error !== navigation.controller.signal.reason) throw error;
+					}
+				}
+				for (const session of [...this.sessionControllers.keys()]) {
+					if (matches(session.sessionManager.getCwd(), session.sessionFile)) await this.releaseSession(session);
+				}
+				await mutate();
+			} finally {
+				this.fileMutation = undefined;
+				this.invalidateSessionList();
+			}
+		})();
+		mutation.done = operation;
+		await operation;
+	}
+
+	async archiveSession(path: string): Promise<void> {
+		await this.mutateSessionFiles({ path }, () => {
+			if (!existsSync(path)) return;
+			const sessionsRoot = join(this.agentDir, "sessions");
+			const rel = path.startsWith(sessionsRoot) ? path.slice(sessionsRoot.length + 1) : basename(path);
+			const dest = join(this.archiveDir(), rel);
+			mkdirSync(dirname(dest), { recursive: true });
+			renameSync(path, dest);
+		});
+	}
+
+	private async killBackground(path: string): Promise<void> {
 		const entry = this.bgSessions.get(path);
 		if (!entry) return;
 		this.bgSessions.delete(path);
 		entry.unsubscribe();
-		entry.session.abort().catch(() => {});
-		entry.session.dispose();
 		this.emitBackground();
+		await this.releaseSession(entry.session);
 	}
 
 	async deleteSession(path: string): Promise<void> {
-		this.invalidateSessionList();
-		if (existsSync(path)) rmSync(path, { force: true });
-		if (this.session?.sessionFile === path) this.disposeSession();
-		this.killBackground(path);
+		await this.mutateSessionFiles({ path }, () => {
+			if (existsSync(path)) rmSync(path, { force: true });
+		});
 	}
 
-	/** Delete every session belonging to a workspace (cwd), then prune the empty dir. */
 	async deleteFolder(cwd: string): Promise<void> {
-		this.invalidateSessionList();
-		const infos = await SessionManager.listAll();
-		const dirs = new Set<string>();
-		for (const s of infos) {
-			if (s.cwd === cwd) {
-				if (this.session?.sessionFile === s.path) this.disposeSession();
-				this.killBackground(s.path);
+		await this.mutateSessionFiles({ cwd }, async () => {
+			const infos = await SessionManager.listAll();
+			const dirs = new Set<string>();
+			for (const s of infos) {
+				if (s.cwd !== cwd) continue;
 				if (existsSync(s.path)) {
 					dirs.add(dirname(s.path));
 					rmSync(s.path, { force: true });
 				}
-				const sidecar = `${s.path}.tasks.json`;
-				if (existsSync(sidecar)) rmSync(sidecar, { force: true });
+				rmSync(`${s.path}.tasks.json`, { force: true });
 			}
-		}
-		// prune now-empty workspace dirs
-		for (const d of dirs) {
-			try {
-				if (existsSync(d) && readdirSync(d).length === 0) rmSync(d, { recursive: true, force: true });
-			} catch {
-				/* ignore */
+			for (const d of dirs) {
+				if (existsSync(d) && readdirSync(d).length === 0) rmdirSync(d);
 			}
-		}
+		});
 	}
 
 	async renameSession(path: string, name: string): Promise<void> {
+		this.assertSessionAvailable(undefined, path);
 		const trimmed = name.trim();
 		this.invalidateSessionList();
 		if (!trimmed) return;
 		if (this.session?.sessionFile === path) {
+			this.assertSessionAvailable(this.session.sessionManager.getCwd(), path);
 			this.session.setSessionName(trimmed);
 			this.emitState();
 			return;
 		}
 		const bg = this.bgSessions.get(path);
 		if (bg) {
+			this.assertSessionAvailable(bg.session.sessionManager.getCwd(), path);
 			bg.session.setSessionName(trimmed);
 			return;
 		}
-		try {
-			const sm = SessionManager.open(path);
-			sm.appendSessionInfo(trimmed);
-		} catch {
-			/* ignore */
-		}
+		const sm = SessionManager.open(path);
+		this.assertSessionAvailable(sm.getCwd(), path);
+		sm.appendSessionInfo(trimmed);
 	}
 
 	private invalidateSessionList(): void {
@@ -983,28 +591,31 @@ export class Driver {
 
 	async listSessions(): Promise<SessionListItem[]> {
 		if (this.sessionListCache) return this.sessionListCache;
-		if (this.sessionListInflight) return this.sessionListInflight;
-		if (!this.sessionIndexWorker) {
-			this.sessionIndexWorker = new Worker(join(__dirname, "session-index-worker.js"), {
-				workerData: { sessionDir: join(this.agentDir, "sessions") },
-			});
-			this.sessionIndexWorker.unref();
+		if (!this.sessionListInflight) {
+			if (!this.sessionIndexWorker) {
+				this.sessionIndexWorker = new Worker(join(__dirname, "session-index-worker.js"), {
+					workerData: { sessionDir: join(this.agentDir, "sessions") },
+				});
+				this.sessionIndexWorker.unref();
+			}
+			const worker = this.sessionIndexWorker;
+			this.sessionListInflight = new Promise<SessionIndexResult>((resolve, reject) => {
+				const cleanup = () => { worker.off("message", onMessage); worker.off("error", onError); };
+				const onMessage = (result: SessionIndexResult | { error: string }) => {
+					cleanup();
+					if ("error" in result) { reject(new Error(result.error)); return; }
+					if (!result.errors.length) this.sessionListCache = result.items;
+					resolve(result);
+				};
+				const onError = (error: Error) => { cleanup(); this.sessionIndexWorker = undefined; reject(error); };
+				worker.once("message", onMessage);
+				worker.once("error", onError);
+				worker.postMessage("scan");
+			}).finally(() => { this.sessionListInflight = undefined; });
 		}
-		const worker = this.sessionIndexWorker;
-		this.sessionListInflight = new Promise<SessionListItem[]>((resolve, reject) => {
-			const cleanup = () => { worker.off("message", onMessage); worker.off("error", onError); };
-			const onMessage = (result: { items?: SessionListItem[]; error?: string }) => {
-				cleanup();
-				if (result.error) { reject(new Error(result.error)); return; }
-				this.sessionListCache = result.items ?? [];
-				resolve(this.sessionListCache);
-			};
-			const onError = (error: Error) => { cleanup(); this.sessionIndexWorker = undefined; reject(error); };
-			worker.once("message", onMessage);
-			worker.once("error", onError);
-			worker.postMessage("scan");
-		}).finally(() => { this.sessionListInflight = undefined; });
-		return this.sessionListInflight;
+		const result = await this.sessionListInflight;
+		if (result.errors.length) this.onError?.(result.errors.join("\n"));
+		return result.items;
 	}
 
 	// ------------------------------------------------------------ conversion
@@ -1159,7 +770,9 @@ export class Driver {
 
 	private wireSession(): void {
 		if (!this.session) return;
-		this.unsubscribe = this.session.subscribe((event) => {
+		const session = this.session;
+		this.unsubscribe = session.subscribe((event) => {
+			if (this.session !== session) return;
 			switch (event.type) {
 				case "message_start":
 					// Clear a previous manual-stop latch only once the new user turn
@@ -1265,7 +878,7 @@ export class Driver {
 		if (messages.length < this.sentRawCount) {
 			const ui = this.toUIMessages(messages);
 			this.resetMessageCursor(ui.length);
-			this.onMessages?.(ui);
+			this.onMessages?.(ui, this.session.sessionId);
 			return;
 		}
 		const from = Math.max(0, this.sentUiCount - this.sentTailUiCount);
@@ -1273,7 +886,7 @@ export class Driver {
 		this.sentUiCount = from + tail.length;
 		this.sentRawCount = messages.length;
 		this.sentTailUiCount = this.toUIMessages(messages.slice(-1)).length;
-		this.onMessagesPatch?.(from, tail);
+		this.onMessagesPatch?.(from, tail, this.session.sessionId);
 	}
 
 	private resetMessageCursor(uiCount: number): void {
@@ -1291,31 +904,103 @@ export class Driver {
 		this.onState?.(s);
 	}
 
-	private disposeSession(): void {
+	private async disposeSession(): Promise<void> {
+		const session = this.session;
 		this.unsubscribe?.();
 		this.unsubscribe = undefined;
-		if (this.session) {
-			this.clearGuiRetry(this.session.sessionId);
-			this.cancelledRuns.delete(this.session.sessionId);
+		if (session) {
+			this.clearGuiRetry(session.sessionId);
+			this.cancelledRuns.delete(session.sessionId);
 		}
-		this.session?.dispose();
 		this.session = undefined;
 		this.clearSessionUiState();
+		if (session) await this.releaseSession(session);
+	}
+
+	shutdown(): Promise<void> {
+		if (this.shutdownPromise) return this.shutdownPromise;
+		this.closing = true;
+		this.shutdownController.abort(new Error("The application is closing"));
+		this.loginController?.abort();
+		const pending = [...this.pendingNavigations];
+		this.cancelNavigation();
+		for (const navigation of pending) navigation.controller.abort(new Error("The application is closing"));
+		for (const controller of this.sessionControllers.values()) controller.abort();
+		this.shutdownPromise = (async () => {
+			const results = await Promise.allSettled([
+				...pending.map((navigation) => navigation.opening),
+				this.disposeSession(),
+				...[...this.bgSessions.keys()].map((path) => this.killBackground(path)),
+				this.fileMutation?.done,
+				this.providerWarmupPromise,
+			]);
+			const remaining = await Promise.allSettled([
+				...[...this.sessionControllers.keys()].map((session) => this.releaseSession(session)),
+				this.modelRuntimePromise.then((runtime) => runtime.settleCredentialWrites()),
+			]);
+			const errors = [...results, ...remaining].flatMap((result, index) => result.status === "rejected"
+				? unresolvedCredentialErrors(result.reason).filter((error) => !(index < pending.length && error === pending[index].controller.signal.reason)) : []);
+			errors.push(...this.shutdownErrors);
+			if (errors.length) throw new AggregateError(errors, `Could not close all sessions: ${errors.map(String).join("; ")}`);
+		})();
+		return this.shutdownPromise;
+	}
+
+	private async runSessionOperation<T>(session: AgentSession, run: () => Promise<T>): Promise<T> {
+		const signal = this.sessionControllers.get(session)!.signal;
+		signal.throwIfAborted();
+		let operations = this.sessionOperations.get(session);
+		if (!operations) this.sessionOperations.set(session, operations = new Set());
+		const operation = Promise.resolve().then(() => {
+			signal.throwIfAborted();
+			return run();
+		});
+		operations.add(operation);
+		try {
+			const result = await operation;
+			signal.throwIfAborted();
+			return result;
+		} finally { operations.delete(operation); }
+	}
+
+	private releaseSession(session: AgentSession): Promise<void> {
+		const releasing = this.releasingSessions.get(session);
+		if (releasing) return releasing;
+		this.sessionTasks.get(session)?.dispose();
+		this.sessionTasks.delete(session);
+		const controller = this.sessionControllers.get(session);
+		controller?.abort(new Error("This session is closing"));
+		const release = (async () => {
+			const results = await Promise.allSettled([
+				Promise.resolve().then(() => session.abort()),
+				...(this.sessionOperations.get(session) ?? []),
+			]);
+			const errors = results.flatMap((result, index) => result.status === "rejected"
+				&& !(index > 0 && controller?.signal.aborted && result.reason === controller.signal.reason) ? [result.reason] : []);
+			this.sessionShutdownErrors.set(session, errors);
+			try { await session.extensionRunner?.emit({ type: "session_shutdown", reason: "quit" }); }
+			catch (error) { errors.push(error); }
+			finally { this.sessionShutdownErrors.delete(session); }
+			try { session.dispose(); }
+			catch (error) { errors.push(error); }
+			try { await session.modelRuntime.settleCredentialWrites(); }
+			catch (error) { errors.push(error); }
+			finally { this.sessionControllers.delete(session); }
+			if (errors.length === 1) throw errors[0];
+			if (errors.length) throw new AggregateError(errors, `Could not release session: ${errors.map(String).join("; ")}`);
+		})();
+		this.releasingSessions.set(session, release);
+		return release;
 	}
 
 	/** Reset the per-session UI bookkeeping WITHOUT touching the session object. */
 	private clearSessionUiState(): void {
-		this.savedTasks = [];
-		this.taskCounter = 0;
 		this.contextCache = undefined;
 		this.lastStateKey = "";
-		this.lastExtractUserCount = -1;
 		this.resetMessageCursor(0);
 		// A fresh attachment must emit the complete transcript once.
 		this.sentRawCount = 0;
 		this.sentTailUiCount = 0;
-		if (this.extractTimer) clearTimeout(this.extractTimer);
-		this.extractTimer = undefined;
 		if (this.msgFlushTimer) clearTimeout(this.msgFlushTimer);
 		this.msgFlushTimer = undefined;
 	}
@@ -1331,8 +1016,9 @@ export class Driver {
 	 * Leaving the current session: if it's mid-run, keep it alive in the
 	 * background (so it finishes + saves); otherwise dispose it.
 	 */
-	private leaveCurrent(): void {
+	private async leaveCurrent(): Promise<void> {
 		if (!this.session) return;
+		this.tasksFor()?.cancelScheduled();
 		const file = this.session.sessionFile;
 		if (!this.session.isIdle && file && !this.bgSessions.has(file)) {
 			const session = this.session;
@@ -1345,7 +1031,7 @@ export class Driver {
 					this.invalidateSessionList();
 					this.onSessionUpdated?.(file);
 					this.markRunEnd(session);
-					this.finishBackground(file);
+					void this.finishBackground(file).catch((error) => this.onError?.(String(error)));
 				}
 			});
 			this.bgSessions.set(file, { session, unsubscribe: unsub, cwd });
@@ -1353,19 +1039,18 @@ export class Driver {
 			this.clearSessionUiState();
 			this.emitBackground();
 		} else {
-			this.disposeSession();
+			await this.disposeSession();
 		}
 	}
 
-	/** A background run finished: notify (green dot / desktop ping) and free it. */
-	private finishBackground(file: string): void {
+	private async finishBackground(file: string): Promise<void> {
 		const entry = this.bgSessions.get(file);
 		if (!entry) return;
 		this.bgSessions.delete(file);
 		entry.unsubscribe();
-		entry.session.dispose();
-		this.onRunComplete?.(file);
 		this.emitBackground();
+		await this.releaseSession(entry.session);
+		this.onRunComplete?.(file);
 	}
 
 	/** If `path` is running in the background, detach it and make it active. */
@@ -1377,7 +1062,7 @@ export class Driver {
 		this.session = entry.session;
 		this.activeCwd = entry.cwd;
 		this.wireSession();
-		this.loadTasks();
+		this.tasksFor();
 		this.scheduleAutoExtract();
 		const messages = this.getMessages();
 		this.resetMessageCursor(messages.length);
@@ -1391,220 +1076,57 @@ export class Driver {
 	// A fast LLM summarizes the conversation into a short list of distinct tasks.
 	// Status is set by the human only; we never auto-decide done/cancelled.
 
-	private taskSidecar(): string | undefined {
-		const f = this.session?.sessionFile;
-		return f ? `${f}.tasks.json` : undefined;
-	}
-
-	private loadTasks(): void {
-		this.savedTasks = [];
-		this.taskCounter = 0;
-		const p = this.taskSidecar();
-		if (!p || !existsSync(p)) return;
-		try {
-			const raw = JSON.parse(readFileSync(p, "utf8"));
-			if (Array.isArray(raw.tasks)) this.savedTasks = raw.tasks;
-			if (typeof raw.counter === "number") this.taskCounter = raw.counter;
-		} catch {
-			/* ignore */
+	private tasksFor(session = this.session): SessionTasks | undefined {
+		if (!session) return undefined;
+		let tasks = this.sessionTasks.get(session);
+		if (!tasks) {
+			tasks = new SessionTasks(session, (model) => this.anthropicClientHeaders(model),
+				(next) => { if (this.session === session) this.onTasks?.(next, session.sessionId); },
+				(message) => this.onError?.(message));
+			this.sessionTasks.set(session, tasks);
 		}
-		// migrate away old per-message tasks (id u*) and cap any long titles
-		const before = this.savedTasks.length;
-		this.savedTasks = this.savedTasks.filter((t) => !t.id.startsWith("u")).map((t) => ({ ...t, title: capTitle(t.title) }));
-		if (this.savedTasks.length !== before) this.persistTasks();
+		return tasks;
 	}
 
-	private persistTasks(): void {
-		const p = this.taskSidecar();
-		if (!p) return;
-		try {
-			mkdirSync(dirname(p), { recursive: true });
-			writeFileSync(p, `${JSON.stringify({ tasks: this.savedTasks, counter: this.taskCounter }, null, 2)}\n`, "utf8");
-		} catch {
-			/* ignore */
-		}
+	getTasks(): Task[] { return this.tasksFor()?.get() ?? []; }
+
+	private activeTasks(sessionId: string): SessionTasks {
+		this.assertSessionAvailable();
+		const session = this.session;
+		if (!session || session.sessionId !== sessionId) throw new Error("The selected session has changed. Reopen it before updating tasks.");
+		this.assertSessionAvailable(session.sessionManager.getCwd(), session.sessionFile);
+		return this.tasksFor(session)!;
 	}
 
-	getTasks(): Task[] {
-		return [...this.savedTasks];
-	}
+	updateTask(task: Task, sessionId: string): Task[] { return this.activeTasks(sessionId).update(task); }
 
-	updateTask(task: Task): Task[] {
-		const idx = this.savedTasks.findIndex((t) => t.id === task.id);
-		if (idx >= 0) this.savedTasks[idx] = { ...this.savedTasks[idx], ...task, updatedAt: Date.now() };
-		this.persistTasks();
-		return this.getTasks();
-	}
+	deleteTask(id: string, sessionId: string): Task[] { return this.activeTasks(sessionId).delete(id); }
 
-	deleteTask(id: string): Task[] {
-		this.savedTasks = this.savedTasks.filter((t) => t.id !== id);
-		this.persistTasks();
-		return this.getTasks();
+	async extractTasks(sessionId: string, force = true): Promise<{ ok: boolean; tasks?: Task[]; error?: string }> {
+		return this.activeTasks(sessionId).extract(force);
 	}
 
 	private scheduleAutoExtract(): void {
-		if (!this.guiSettings.autoExtractTasks) return;
-		if (this.extractTimer) clearTimeout(this.extractTimer);
-		this.extractTimer = setTimeout(() => {
-			this.extractTasks(false)
-				.then((r) => {
-					if (r.ok && r.tasks) this.onTasks?.(r.tasks);
-				})
-				.catch(() => {});
-		}, 1500);
+		if (this.guiSettings.autoExtractTasks) this.tasksFor()?.schedule();
 	}
-
-	private async pickExtractionModel(): Promise<Model<any> | undefined> {
-		const avail = (await (await this.runtime()).getAvailable()) as AnyModel[];
-		const haikus = avail.filter((m) => m.provider === "anthropic" && m.id.includes("haiku"));
-		// Prefer a CURRENT haiku (4.x). The old claude-3-5-haiku-* is end-of-life and
-		// silently returns empty content, which made task extraction produce nothing.
-		const haiku =
-			haikus.find((m) => /haiku-4/.test(m.id)) || haikus.find((m) => m.id === "claude-3-5-haiku-latest");
-		if (haiku) return haiku;
-		if (this.session?.model) return this.session.model; // fall back to the active model (works fine)
-		return avail[0];
-	}
-
-	private norm(s: string): string {
-		return s.toLowerCase().replace(/[^a-z0-9\u4e00-\u9fff]+/g, " ").trim();
-	}
-
-	/** Summarize the conversation into concept-level tasks via a fast LLM. */
-	async extractTasks(force = true): Promise<{ ok: boolean; tasks?: Task[]; error?: string }> {
-		if (!this.session) return { ok: false, error: "No active session" };
-		if (this.extracting) return { ok: true, tasks: this.getTasks() };
-		const sid = this.session.sessionId;
-		const msgs = this.session.messages as any[];
-		// Token guard: auto-runs only when a NEW user turn appeared since last extraction.
-		const userCount = msgs.filter((m) => m.role === "user").length;
-		if (!force && userCount === this.lastExtractUserCount) return { ok: true, tasks: this.getTasks() };
-		const model = await this.pickExtractionModel();
-		if (!model) return { ok: false, error: "No model available for extraction" };
-
-		const lines: string[] = [];
-		for (const m of msgs) {
-			if (m.role === "user") {
-				const t = typeof m.content === "string" ? m.content : (m.content ?? []).filter((c: any) => c.type === "text").map((c: any) => c.text).join(" ");
-				if (t.trim()) lines.push(`USER: ${t.trim().slice(0, 600)}`);
-			} else if (m.role === "assistant") {
-				const t = (m.content ?? []).filter((c: any) => c.type === "text").map((c: any) => c.text).join(" ");
-				if (t.trim()) lines.push(`ASSISTANT: ${t.trim().slice(0, 300)}`);
-			}
-		}
-		if (lines.length === 0) return { ok: true, tasks: this.getTasks() };
-		let transcript = "";
-		for (let i = lines.length - 1; i >= 0; i--) {
-			if (transcript.length + lines[i].length > 16000) break;
-			transcript = `${lines[i]}\n${transcript}`;
-		}
-
-		const existingOpen = this.savedTasks.filter((t) => t.status === "open").map((t) => t.title);
-		const sys =
-			"You extract a short reminder list of distinct TASKS (small projects or informal requests the user raised) from a conversation. " +
-			"Group multiple turns about the same thing into ONE task. Each task title MUST be an ultra-short reminder of at most 20 characters (count CJK characters as 1 each), a noun phrase in the user's own language, NOT a sentence or quote. " +
-			"Example good titles: '图片归类', '加外链', 'fix login bug'. Ignore chit-chat and clarifications. Return STRICT JSON only: {\"tasks\":[\"title\", ...]}. No prose.";
-		const user =
-			(existingOpen.length
-				? `Existing open tasks (reuse wording if the same task still applies):\n${existingOpen.map((t) => `- ${t}`).join("\n")}\n\n`
-				: "") + `Conversation:\n${transcript}`;
-
-		this.extracting = true;
-		try {
-			const result = await (await this.runtime()).completeSimple(
-				model,
-				{ systemPrompt: sys, messages: [{ role: "user", content: user, timestamp: Date.now() }] },
-				{ maxTokens: 1024, headers: this.anthropicClientHeaders(model) },
-			);
-			const text = (result.content ?? []).filter((c: any) => c.type === "text").map((c: any) => c.text).join("");
-			// Bail out if the user switched sessions while we were summarizing, so we
-			// never write/show one session's tasks under another.
-			if (!this.session || this.session.sessionId !== sid) return { ok: false, error: "session changed" };
-			this.lastExtractUserCount = userCount;
-			const titles = this.parseTaskTitles(text);
-			if (titles.length === 0) return { ok: true, tasks: this.getTasks() };
-			this.reconcileTasks(titles);
-			return { ok: true, tasks: this.getTasks() };
-		} catch (err) {
-			return { ok: false, error: err instanceof Error ? err.message : String(err) };
-		} finally {
-			this.extracting = false;
-		}
-	}
-
-	private parseTaskTitles(text: string): string[] {
-		let jsonStr = text.trim();
-		const fence = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
-		if (fence) jsonStr = fence[1].trim();
-		const brace = jsonStr.indexOf("{");
-		const lastBrace = jsonStr.lastIndexOf("}");
-		if (brace >= 0 && lastBrace > brace) jsonStr = jsonStr.slice(brace, lastBrace + 1);
-		try {
-			const parsed = JSON.parse(jsonStr);
-			const arr = Array.isArray(parsed) ? parsed : parsed.tasks;
-			if (!Array.isArray(arr)) return [];
-			return arr
-				.map((x) => (typeof x === "string" ? x : x?.title))
-				.filter((s): s is string => typeof s === "string" && s.trim().length > 0)
-				.map((s) => capTitle(s));
-		} catch {
-			return [];
-		}
-	}
-
-	/** Rebuild the OPEN frontier from extracted titles; preserve human decisions + manual tasks. */
-	private reconcileTasks(titles: string[]): void {
-		const now = Date.now();
-		const preserved = this.savedTasks.filter((t) => t.status !== "open" || t.sourceIndex === -1);
-		const preservedNorms = new Set(preserved.map((t) => this.norm(t.title)));
-		const openByNorm = new Map(
-			this.savedTasks.filter((t) => t.status === "open" && t.sourceIndex !== -1).map((t) => [this.norm(t.title), t]),
-		);
-		const next: Task[] = [...preserved];
-		const seen = new Set<string>();
-		for (const title of titles) {
-			const n = this.norm(title);
-			if (!n || seen.has(n) || preservedNorms.has(n)) continue;
-			seen.add(n);
-			const existing = openByNorm.get(n);
-			if (existing) next.push(existing);
-			else next.push({ id: `a${++this.taskCounter}`, title: capTitle(title), status: "open", sourceIndex: 0, createdAt: now, updatedAt: now });
-		}
-		this.savedTasks = next;
-		this.persistTasks();
-	}
-
-	// ------------------------------------------------------ commands / workspaces
 
 	async getCommands(): Promise<CommandInfo[]> {
-		await this.resourceLoader.reload();
+		if (!this.session) await this.warmExtensionProviders();
+		const loader = this.session?.resourceLoader ?? this.catalogLoader;
 		const out: CommandInfo[] = [...BUILTIN_COMMANDS];
-		const ext = this.resourceLoader.getExtensions();
+		const ext = loader.getExtensions();
 		for (const e of ext.extensions) {
 			for (const [name, cmd] of e.commands) {
 				out.push({ name, description: (cmd as any)?.description ?? "", source: "extension" });
 			}
 		}
-		for (const p of this.resourceLoader.getPrompts().prompts) {
+		for (const p of loader.getPrompts().prompts) {
 			out.push({ name: p.name, description: (p as any).description ?? "prompt template", source: "prompt" });
 		}
-		for (const s of this.resourceLoader.getSkills().skills) {
+		for (const s of loader.getSkills().skills) {
 			out.push({ name: `skill:${s.name}`, description: s.description, source: "skill" });
 		}
 		return out;
-	}
-
-	async listWorkspaces(): Promise<WorkspaceInfo[]> {
-		const infos = await SessionManager.listAll();
-		const map = new Map<string, WorkspaceInfo>();
-		for (const s of infos) {
-			if (!s.cwd) continue;
-			const cur = map.get(s.cwd);
-			const lu = s.modified.getTime();
-			if (!cur) map.set(s.cwd, { cwd: s.cwd, name: basename(s.cwd) || s.cwd, lastUsed: lu });
-			else if (lu > cur.lastUsed) cur.lastUsed = lu;
-		}
-		return [...map.values()].sort((a, b) => b.lastUsed - a.lastUsed);
 	}
 
 	readFile(path: string): string {
@@ -1641,7 +1163,7 @@ export class Driver {
 
 	async getAccounts(): Promise<AccountInfo[]> {
 		await this.warmExtensionProviders();
-		const runtime = await this.runtime();
+		const runtime = this.session?.modelRuntime ?? await this.runtime();
 		return runtime
 			.getProviders()
 			.filter((p) => (p.auth?.oauth && p.id !== "github-copilot") || p.id === "deepseek" || p.id === "antigravity")
@@ -1653,7 +1175,7 @@ export class Driver {
 	async deleteExtension(path: string): Promise<void> {
 		try {
 			if (existsSync(path)) rmSync(path, { force: true });
-			await this.resourceLoader.reload();
+			this.providerWarmupPromise = undefined;
 		} catch {
 			/* ignore */
 		}
@@ -1668,7 +1190,7 @@ export class Driver {
 			} else if (existsSync(filePath)) {
 				rmSync(filePath, { force: true });
 			}
-			await this.resourceLoader.reload();
+			this.providerWarmupPromise = undefined;
 		} catch {
 			/* ignore */
 		}
@@ -1683,7 +1205,11 @@ export class Driver {
 			await this.antigravitySettings.save(input);
 			const runtime = await this.runtime();
 			await runtime.setRuntimeApiKey("antigravity", "heipang-relay");
-			const refreshed = await runtime.refresh({ providers: ["antigravity"], allowNetwork: true, force: true });
+			const refreshed = await runtime.refresh({ providers: ["antigravity"], allowNetwork: true, force: true, signal: this.shutdownController.signal });
+			await Promise.all(this.liveSessions().map(async (session) => {
+				await session.modelRuntime.setRuntimeApiKey("antigravity", "heipang-relay");
+				await session.modelRuntime.refresh({ allowNetwork: false });
+			}));
 			const enabled = this.settings.getEnabledModels() ?? [];
 			if (enabled.length > 0) {
 				this.settings.setEnabledModels([...new Set([...enabled, ...runtime.getModels("antigravity").map((model) => `antigravity/${model.id}`)])]);
@@ -1697,14 +1223,22 @@ export class Driver {
 	}
 
 	async loginAccount(id: string): Promise<{ ok: boolean; error?: string }> {
+		if (this.closing) return { ok: false, error: "The application is closing" };
 		if (id === "antigravity") return { ok: false, error: "Configure the relay URL and key in Accounts." };
 		if (!this.oauthBridge) return { ok: false, error: "OAuth bridge unavailable" };
+		if (this.loginController) return { ok: false, error: "Another sign-in is in progress. Complete or cancel it first." };
+		const controller = new AbortController();
+		this.loginController = controller;
 		const bridge = this.oauthBridge;
 		let authUrl = "";
 		try {
-			const runtime = await this.runtime();
+			const session = this.session;
+			const runtime = session?.modelRuntime ?? await this.runtime();
 			const authType = id === "deepseek" ? "api_key" : "oauth";
+			const sessionSignal = session && this.sessionControllers.get(session)?.signal;
+			const loginSignal = AbortSignal.any([controller.signal, this.shutdownController.signal, ...(sessionSignal ? [sessionSignal] : [])]);
 			await runtime.login(id, authType, {
+				signal: loginSignal,
 				notify: (event) => {
 					if (event.type === "auth_url") {
 						if (event.url) {
@@ -1719,12 +1253,14 @@ export class Driver {
 					}
 				},
 				prompt: async (prompt: AuthPrompt) => {
+					const signal = prompt.signal ? AbortSignal.any([prompt.signal, loginSignal]) : loginSignal;
 					if (prompt.type === "select") {
 						const choice = await bridge.requestInput("select", {
 							message: prompt.message,
-							options: prompt.options.map((o) => ({ value: o.id, label: o.label })),
-						});
-						return choice ?? "";
+							options: prompt.options.map((o) => ({ id: o.id, label: o.label })),
+						}, { signal });
+						if (choice == null) throw new Error("Sign-in cancelled");
+						return choice;
 					}
 					const kind = prompt.type === "manual_code" ? "code" : prompt.type === "secret" ? "secret" : "prompt";
 					const isCallbackPaste = prompt.type === "text" && /localhost:51121|oauth-callback/.test(prompt.placeholder ?? "");
@@ -1736,7 +1272,7 @@ export class Driver {
 					const input = await bridge.requestInput(kind, {
 						message,
 						placeholder: prompt.placeholder,
-					});
+					}, { signal });
 					if (input == null || !input.trim()) throw new Error("Sign-in cancelled");
 					const value = input.trim();
 					if (id === "deepseek" && prompt.type === "secret") {
@@ -1744,7 +1280,7 @@ export class Driver {
 						// rejected key or raw server response into errors or logs.
 						const response = await fetch("https://api.deepseek.com/models", {
 							headers: { Authorization: `Bearer ${value}`, Accept: "application/json" },
-							signal: AbortSignal.timeout(15_000),
+							signal: AbortSignal.any([signal, AbortSignal.timeout(15_000)]),
 						});
 						if (!response.ok) throw new Error(`DeepSeek API key verification failed (HTTP ${response.status})`);
 						const catalog: any = await response.json();
@@ -1759,26 +1295,21 @@ export class Driver {
 			return { ok: true };
 		} catch (err) {
 			return { ok: false, error: err instanceof Error ? err.message : String(err) };
+		} finally {
+			controller.abort();
+			this.loginController = undefined;
 		}
 	}
 
 	async logoutAccount(id: string): Promise<void> {
+		this.shutdownController.signal.throwIfAborted();
 		if (id === "antigravity") {
 			this.antigravitySettings.clear();
 			await (await this.runtime()).removeRuntimeApiKey(id);
+			await Promise.all(this.liveSessions().map((session) => session.modelRuntime.removeRuntimeApiKey(id)));
 			return;
 		}
-		await (await this.runtime()).logout(id);
-	}
-
-	/** Resolved API key/token for a provider (OAuth tokens are refreshed for us). */
-	private async providerApiKey(provider: string): Promise<string | undefined> {
-		try {
-			const auth = await (await this.runtime()).getAuth(provider);
-			return auth?.auth.apiKey;
-		} catch {
-			return undefined;
-		}
+		await (this.session?.modelRuntime ?? await this.runtime()).logout(id, { signal: this.shutdownController.signal });
 	}
 
 	// --------------------------------------------------------------- usage
@@ -1830,7 +1361,7 @@ export class Driver {
 			return value;
 		};
 		try {
-			const apiKey = await this.providerApiKey(provider);
+			const apiKey = await this.catalog.providerApiKey(provider);
 			if (!apiKey) return { provider, error: "Not signed in" };
 			if (provider === "anthropic") {
 				const res = await fetch("https://api.anthropic.com/api/oauth/usage", {
@@ -1917,39 +1448,188 @@ export class Driver {
 	}
 
 	async openSession(path: string): Promise<OpenSessionResult> {
-		// Returning to a session that's still running in the background: re-attach
-		// to the live run instead of reloading a stale copy from disk.
-		if (this.bgSessions.has(path)) {
-			this.leaveCurrent();
-			if (this.reattachBackground(path)) {
-				return { state: this.getActiveState()!, messages: this.getMessages() };
+		this.assertSessionAvailable(undefined, path);
+		const key = sessionFileKey(path);
+		if (this.session?.sessionFile && sessionFileKey(this.session.sessionFile) === key) {
+			this.assertSessionAvailable(this.session.sessionManager.getCwd(), path);
+			this.cancelNavigation();
+			return { state: this.getActiveState()!, messages: this.getMessages() };
+		}
+		const background = [...this.bgSessions].find(([file]) => sessionFileKey(file) === key);
+		if (background) {
+			const [file, entry] = background;
+			const cwd = entry.session.sessionManager.getCwd();
+			this.assertSessionAvailable(cwd, path);
+			const sequence = this.cancelNavigation();
+			const controller = new AbortController();
+			this.navigation = { cwd, path, controller };
+			try {
+				await this.leaveCurrent();
+				if (sequence !== this.navigationSequence) throw controller.signal.reason;
+				this.assertSessionAvailable(cwd, path);
+				if (this.reattachBackground(file)) return { state: this.getActiveState()!, messages: this.getMessages() };
+			} finally {
+				if (sequence === this.navigationSequence) this.navigation = undefined;
 			}
 		}
-		this.leaveCurrent();
-		const sessionManager = SessionManager.open(path);
-		const { session, modelFallbackMessage } = await createAgentSession({
-			agentDir: this.agentDir,
-			cwd: sessionManager.getCwd(),
-			modelRuntime: await this.runtime(),
-			settingsManager: this.settings,
-			resourceLoader: this.resourceLoader,
-			sessionManager,
+		return this.navigate({ path });
+	}
+
+	private cancelNavigation(): number {
+		this.navigation?.controller.abort(new Error("Session navigation was superseded"));
+		this.navigation = undefined;
+		return ++this.navigationSequence;
+	}
+
+	private async createSession(cwd: string, controller: AbortController, sessionManager?: SessionManager) {
+		const { settingsManager, resourceLoader } = await loadSessionResources(cwd, this.agentDir, this.oauthBridge, controller.signal);
+		const modelRuntime = await this.createModelRuntime();
+		let session: AgentSession | undefined;
+		try {
+			controller.signal.throwIfAborted();
+			const result = await createAgentSession({
+				agentDir: this.agentDir, cwd, settingsManager, resourceLoader, sessionManager, modelRuntime,
+			});
+			session = result.session;
+			this.sessionControllers.set(session, controller);
+			controller.signal.throwIfAborted();
+			this.installSessionGuards(session);
+			await session.bindExtensions({
+				mode: "rpc",
+				uiContext: this.oauthBridge ? createExtensionUI(this.oauthBridge,
+					(message) => { if (this.session === session) this.onError?.(message); }, controller.signal) : undefined,
+				onError: (error) => {
+					const message = `${error.extensionPath}: ${error.error}`;
+					const shutdownErrors = this.sessionShutdownErrors.get(session!);
+					if (error.event === "session_shutdown" && shutdownErrors) shutdownErrors.push(new Error(message));
+					else if (this.closing) this.shutdownErrors.push(new Error(message));
+					this.onError?.(message);
+				},
+			});
+			return result;
+		} catch (error) {
+			try {
+				if (session) await this.releaseSession(session);
+				else await modelRuntime.settleCredentialWrites();
+			} catch (cleanupError) {
+				throw new AggregateError([error, cleanupError], `${String(error)}; session cleanup failed: ${String(cleanupError)}`);
+			}
+			throw error;
+		}
+	}
+
+	private async navigate(target: { cwd: string } | { path: string }): Promise<OpenSessionResult> {
+		const path = "path" in target ? target.path : undefined;
+		const key = path === undefined ? undefined : sessionFileKey(path);
+		const owners = key ? [...this.sessionControllers.keys()].filter((session) => session.sessionFile && sessionFileKey(session.sessionFile) === key) : [];
+		const pending = key ? [...this.pendingNavigations].filter((previous) => previous.path && sessionFileKey(previous.path) === key) : [];
+		const cwd = "cwd" in target ? target.cwd : owners[0]?.sessionManager.getCwd() ?? pending.find((previous) => previous.cwd)?.cwd;
+		this.assertSessionAvailable(cwd, path);
+		const releases = owners.flatMap((session) => {
+			const release = this.releasingSessions.get(session);
+			return release ? [release] : [];
 		});
-		this.installSessionGuards(session);
-		this.session = session;
-		this.activeCwd = sessionManager.getCwd();
-		this.wireSession();
-		this.loadTasks();
-		this.scheduleAutoExtract();
-		const messages = this.getMessages();
-		this.resetMessageCursor(messages.length);
-		return { state: this.getActiveState()!, messages, modelFallbackMessage };
+		const sequence = this.cancelNavigation();
+		const controller = new AbortController();
+		const navigation: SessionNavigation = { cwd, path, controller };
+		this.navigation = navigation;
+		this.pendingNavigations.add(navigation);
+		const opening = (async () => {
+			if (pending.length || releases.length) {
+				await Promise.all([...releases, ...pending.map(async (previous) => {
+					try { await previous.opening; }
+					catch (error) { if (error !== previous.controller.signal.reason) throw error; }
+				})]);
+			}
+			controller.signal.throwIfAborted();
+			this.assertSessionAvailable(cwd, path);
+			if (path !== undefined && !existsSync(path)) throw new Error(`Session file no longer exists: ${path}`);
+			const manager = "path" in target ? SessionManager.open(target.path) : undefined;
+			const projectCwd = "cwd" in target ? target.cwd : manager!.getCwd();
+			navigation.cwd = projectCwd;
+			this.assertSessionAvailable(projectCwd, path);
+			const { session, modelFallbackMessage } = await this.createSession(projectCwd, controller, manager);
+			try {
+				if (sequence !== this.navigationSequence || controller.signal.aborted) throw controller.signal.reason;
+				await this.leaveCurrent();
+				if (sequence !== this.navigationSequence || controller.signal.aborted) throw controller.signal.reason;
+				this.assertSessionAvailable(projectCwd, path);
+			} catch (error) {
+				try { await this.releaseSession(session); }
+				catch (cleanupError) {
+					throw new AggregateError([error, cleanupError], `${String(error)}; session cleanup failed: ${String(cleanupError)}`);
+				}
+				throw error;
+			}
+			this.session = session;
+			this.activeCwd = projectCwd;
+			this.wireSession();
+			this.tasksFor();
+			this.scheduleAutoExtract();
+			this.invalidateSessionList();
+			const messages = this.getMessages();
+			this.resetMessageCursor(messages.length);
+			return { state: this.getActiveState()!, messages, modelFallbackMessage };
+		})();
+		navigation.opening = opening;
+		try {
+			return await opening;
+		} finally {
+			this.pendingNavigations.delete(navigation);
+			if (this.navigation === navigation) this.navigation = undefined;
+		}
 	}
 
 	private installSessionGuards(session: AgentSession): void {
+		const sessionSignal = this.sessionControllers.get(session)!.signal;
+		const promptContext = new AsyncLocalStorage<AbortSignal>();
+		const dispose = session.dispose.bind(session);
+		session.dispose = () => {
+			try { dispose(); }
+			finally { promptContext.disable(); }
+		};
+		let promptController = new AbortController();
+		const abort = session.abort.bind(session);
+		session.abort = async () => {
+			promptController.abort(new Error("The prompt was stopped"));
+			promptController = new AbortController();
+			const errors: unknown[] = [];
+			try { session.clearQueue(); }
+			catch (error) { errors.push(error); }
+			try { await abort(); }
+			catch (error) { errors.push(error); }
+			if (errors.length === 1) throw errors[0];
+			if (errors.length) throw new AggregateError(errors, `Could not stop session: ${errors.map(String).join("; ")}`);
+		};
+		const prompt = session.prompt.bind(session);
+		session.prompt = async (...args) => {
+			sessionSignal.throwIfAborted();
+			const signal = promptContext.getStore() ?? AbortSignal.any([sessionSignal, promptController.signal]);
+			if (signal.aborted) return;
+			return this.runSessionOperation(session, () => promptContext.run(signal, async () => {
+				if (!signal.aborted) await prompt(...args);
+			}));
+		};
+		// The pinned SDK has no public cancellation boundary after input hooks or authentication.
+		const preparation = session as unknown as Record<"_preparePrompt" | "_runInputHandlers", (...args: unknown[]) => Promise<unknown>>;
+		for (const name of ["_preparePrompt", "_runInputHandlers"] as const) {
+			const prepare = preparation[name].bind(session);
+			preparation[name] = async (...args) => {
+				const signal = promptContext.getStore();
+				sessionSignal.throwIfAborted();
+				if (signal?.aborted) return undefined;
+				const result = await prepare(...args);
+				sessionSignal.throwIfAborted();
+				return signal?.aborted ? undefined : result;
+			};
+		}
 		const previousTransform = session.agent.transformContext;
 		session.agent.transformContext = async (messages, signal) => {
-			const transformed = previousTransform ? await previousTransform(messages, signal) : messages;
+			const promptSignal = promptContext.getStore();
+			const ownedSignal = AbortSignal.any([sessionSignal, ...(signal ? [signal] : []), ...(promptSignal ? [promptSignal] : [])]);
+			ownedSignal.throwIfAborted();
+			const transformed = previousTransform ? await previousTransform(messages, ownedSignal) : messages;
+			ownedSignal.throwIfAborted();
 			return guardManyImageContext(transformed);
 		};
 
@@ -1960,9 +1640,12 @@ export class Driver {
 		// already surfaced in the GUI.
 		const previousStream = session.agent.streamFunction;
 		session.agent.streamFunction = (model: any, context: any, options: any) => {
+			sessionSignal.throwIfAborted();
+			const promptSignal = promptContext.getStore();
+			promptSignal?.throwIfAborted();
 			const idleAbort = model.provider === "openai-codex" ? new AbortController() : undefined;
-			const signal = idleAbort ? (options?.signal
-				? AbortSignal.any([options.signal, idleAbort.signal]) : idleAbort.signal) : options?.signal;
+			const signal = AbortSignal.any([sessionSignal, ...(options?.signal ? [options.signal] : []),
+				...(promptSignal ? [promptSignal] : []), ...(idleAbort ? [idleAbort.signal] : [])]);
 			const requestOptions = {
 				...options, signal, maxRetries: 0,
 				// Idle timeouts, not a total duration limit: active long answers can
@@ -1988,35 +1671,24 @@ export class Driver {
 	}
 
 	async newSession(cwd?: string): Promise<OpenSessionResult> {
-		this.leaveCurrent();
-		const workdir = cwd && existsSync(cwd) ? cwd : homedir();
-		const { session, modelFallbackMessage } = await createAgentSession({
-			agentDir: this.agentDir,
-			cwd: workdir,
-			modelRuntime: await this.runtime(),
-			settingsManager: this.settings,
-			resourceLoader: this.resourceLoader,
-		});
-		this.installSessionGuards(session);
-		this.invalidateSessionList();
-		this.session = session;
-		this.activeCwd = workdir;
-		this.wireSession();
-		this.loadTasks();
-		const messages = this.getMessages();
-		this.resetMessageCursor(messages.length);
-		return { state: this.getActiveState()!, messages, modelFallbackMessage };
+		return this.navigate({ cwd: cwd && existsSync(cwd) ? cwd : homedir() });
 	}
 
 	async ensureSession(): Promise<void> {
-		if (!this.session) await this.newSession();
+		this.assertSessionAvailable();
+		if (this.navigation?.opening) await this.navigation.opening;
+		else if (!this.session) await this.newSession();
 	}
 
 	// ------------------------------------------------------------- messaging
 
-	async sendMessage(text: string, images?: { data: string; mimeType: string; name?: string }[]): Promise<void> {
+	async sendMessage(text: string, images?: { data: string; mimeType: string; name?: string }[], expectedSessionId = this.session?.sessionId ?? null): Promise<void> {
+		this.assertSessionAvailable();
+		if (expectedSessionId !== (this.session?.sessionId ?? null)) throw new Error("The selected session has changed. Reopen it before sending.");
 		await this.ensureSession();
 		if (!this.session) throw new Error("No active session");
+		if (expectedSessionId && expectedSessionId !== this.session.sessionId) throw new Error("The selected session has changed. Reopen it before sending.");
+		this.assertSessionAvailable(this.session.sessionManager.getCwd(), this.session.sessionFile);
 		if (this.session.model?.id === "deepseek-v4-pro" && images?.length) {
 			throw new Error("DeepSeek V4 Pro is text-only. Use a vision-capable model for images or PDF attachments.");
 		}
@@ -2024,13 +1696,14 @@ export class Driver {
 		const imgs = images?.length
 			? images.map((i) => ({ type: "image" as const, data: i.data, mimeType: i.mimeType, name: i.name }))
 			: undefined;
-		this.markRunStart(this.session);
-		if (this.session.isStreaming) {
-			await this.session.prompt(text, { streamingBehavior: "followUp", images: imgs });
+		const session = this.session;
+		const signal = this.sessionControllers.get(session)!.signal;
+		this.markRunStart(session);
+		if (session.isStreaming) {
+			await session.prompt(text, { streamingBehavior: "followUp", images: imgs });
 		} else {
-			// fire and forget; events drive UI. Catch to surface errors.
-			this.session.prompt(text, imgs ? { images: imgs } : undefined).catch((err) => {
-				this.onError?.(err instanceof Error ? err.message : String(err));
+			void session.prompt(text, imgs ? { images: imgs } : undefined).catch((error) => {
+				if (!signal.aborted || error !== signal.reason) this.onError?.(error instanceof Error ? error.message : String(error));
 			});
 		}
 	}
@@ -2052,23 +1725,34 @@ export class Driver {
 
 	async setModel(provider: string, id: string): Promise<ActiveState> {
 		await this.ensureSession();
-		const runtime = await this.runtime();
-		const model = runtime.getModel(provider, id) as AnyModel | undefined;
-		if (!model) throw new Error(`Model not found: ${provider}/${id}`);
-		if (provider === "deepseek" && !runtime.hasConfiguredAuth(provider)) {
-			const connected = await this.loginAccount(provider);
-			if (!connected.ok) throw new Error(connected.error ?? "DeepSeek API key is required");
-		}
-		const previousThinking = this.session!.thinkingLevel;
-		await this.session!.setModel(model);
-		if (provider === "deepseek" && !getSupportedThinkingLevels(model).includes(previousThinking as any)) {
-			// DeepSeek's default is high. Do not silently turn Claude/GPT xhigh into
-			// DeepSeek max, which is substantially more expensive in reasoning time.
-			this.session!.setThinkingLevel("high");
-		}
-		this.contextCache = undefined;
-		this.emitState();
-		return this.getActiveState()!;
+		const session = this.session;
+		if (!session) throw new Error("No active session");
+		this.assertSessionAvailable(session.sessionManager.getCwd(), session.sessionFile);
+		const signal = this.sessionControllers.get(session)!.signal;
+		signal.throwIfAborted();
+		return this.runSessionOperation(session, async () => {
+			const runtime = session.modelRuntime;
+			await runtime.refresh({ allowNetwork: false, signal });
+			signal.throwIfAborted();
+			const model = runtime.getModel(provider, id) as AnyModel | undefined;
+			if (!model) throw new Error(`Model not found: ${provider}/${id}`);
+			if (provider === "deepseek" && !runtime.hasConfiguredAuth(provider)) {
+				const connected = await this.loginAccount(provider);
+				signal.throwIfAborted();
+				if (!connected.ok) throw new Error(connected.error ?? "DeepSeek API key is required");
+			}
+			const previousThinking = session.thinkingLevel;
+			await session.setModel(model);
+			signal.throwIfAborted();
+			if (provider === "deepseek" && !getSupportedThinkingLevels(model).includes(previousThinking as any)) {
+				// DeepSeek's default is high. Do not silently turn Claude/GPT xhigh into
+				// DeepSeek max, which is substantially more expensive in reasoning time.
+				session.setThinkingLevel("high");
+			}
+			this.contextCache = undefined;
+			this.emitState();
+			return this.getActiveState()!;
+		});
 	}
 
 	async setThinkingLevel(level: ThinkingLevel): Promise<ActiveState> {

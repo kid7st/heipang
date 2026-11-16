@@ -1,5 +1,5 @@
 import { parentPort, workerData } from "node:worker_threads";
-import { createReadStream } from "node:fs";
+import { createReadStream, type Dirent } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { join } from "node:path";
@@ -7,7 +7,17 @@ import type { SessionListItem } from "../shared/types";
 
 // Parsing image-heavy JSONL histories must not block the provider/UI event loop.
 // A metadata cache means a refresh reads only files that actually changed.
+export interface SessionIndexResult {
+	items: SessionListItem[];
+	errors: string[];
+}
+
 const cache = new Map<string, { signature: string; item: SessionListItem | null }>();
+
+function ignoreMissing<T>(error: unknown): T[] {
+	if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+	throw error;
+}
 async function readInfo(path: string, modifiedFallback: number): Promise<SessionListItem | null> {
 	let header: any;
 	let name: string | undefined;
@@ -17,10 +27,13 @@ async function readInfo(path: string, modifiedFallback: number): Promise<Session
 	const texts: string[] = [];
 	const input = createReadStream(path, { encoding: "utf8" });
 	const lines = createInterface({ input, crlfDelay: Infinity });
+	let incompleteLine = false;
 	try {
 		for await (const line of lines) {
+			if (!line.trim()) continue;
+			if (incompleteLine) throw new Error("Invalid JSON before the final session line");
 			let entry: any;
-			try { entry = JSON.parse(line); } catch { continue; } // tolerate a partially appended last line
+			try { entry = JSON.parse(line); } catch { incompleteLine = true; continue; }
 			if (!header) {
 				if (entry.type !== "session") return null;
 				header = entry;
@@ -47,33 +60,44 @@ async function readInfo(path: string, modifiedFallback: number): Promise<Session
 		created, modified: modified || (Number.isFinite(created) ? created : modifiedFallback),
 		messageCount: count, firstMessage: first || "(no messages)", allMessagesText: texts.join(" ") };
 }
-async function scan(): Promise<SessionListItem[]> {
+async function scan(): Promise<SessionIndexResult> {
 	const root = String(workerData.sessionDir);
-	const directories = await readdir(root, { withFileTypes: true }).catch(() => []);
-	const result: SessionListItem[] = [];
+	const directories = await readdir(root, { withFileTypes: true }).catch(ignoreMissing<Dirent>);
+	const items: SessionListItem[] = [];
+	const errors: string[] = [];
 	const seen = new Set<string>();
 	for (const directory of directories) {
 		if (!directory.isDirectory()) continue;
 		const folder = join(root, directory.name);
-		const names = (await readdir(folder).catch(() => [])).filter((name) => name.endsWith(".jsonl"));
+		let names: string[];
+		try { names = (await readdir(folder).catch(ignoreMissing<string>)).filter((name) => name.endsWith(".jsonl")); }
+		catch (error) {
+			errors.push(`Could not index session folder ${folder}: ${error instanceof Error ? error.message : String(error)}`);
+			continue;
+		}
 		for (const name of names) {
 			const path = join(folder, name);
-			const metadata = await stat(path).catch(() => undefined);
-			if (!metadata) continue;
-			seen.add(path);
-			const signature = `${metadata.size}:${metadata.mtimeMs}`;
-			let cached = cache.get(path);
-			if (!cached || cached.signature !== signature) {
-				cached = { signature, item: await readInfo(path, metadata.mtimeMs).catch(() => null) };
-				cache.set(path, cached);
+			try {
+				const metadata = await stat(path);
+				seen.add(path);
+				const signature = `${metadata.size}:${metadata.mtimeMs}`;
+				let cached = cache.get(path);
+				if (!cached || cached.signature !== signature) {
+					cached = { signature, item: await readInfo(path, metadata.mtimeMs) };
+					cache.set(path, cached);
+				}
+				if (cached.item) items.push(cached.item);
+			} catch (error) {
+				cache.delete(path);
+				if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+				errors.push(`Could not index session ${path}: ${error instanceof Error ? error.message : String(error)}`);
 			}
-			if (cached.item) result.push(cached.item);
 		}
 	}
 	for (const path of cache.keys()) if (!seen.has(path)) cache.delete(path);
-	return result.sort((a, b) => b.modified - a.modified);
+	return { items: items.sort((a, b) => b.modified - a.modified), errors };
 }
 parentPort?.on("message", async () => {
-	try { parentPort?.postMessage({ items: await scan() }); }
+	try { parentPort?.postMessage(await scan()); }
 	catch (error) { parentPort?.postMessage({ error: error instanceof Error ? error.message : String(error) }); }
 });

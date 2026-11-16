@@ -4,6 +4,7 @@ import { join } from "node:path";
 import type { Driver } from "./driver.js";
 import type { AntigravitySettingsInput, StreamEvent, Task } from "../shared/types.js";
 import { checkForUpdate, downloadAndInstall } from "./updater.js";
+import { InputRequests, type InputBridge } from "./input-requests.js";
 
 /**
  * Registers IPC handlers and forwards driver events to the renderer.
@@ -16,46 +17,44 @@ export function registerIpc(driver: Driver, getWindow: () => BrowserWindow | nul
 		if (win && !win.isDestroyed()) win.webContents.send("pi:event", e);
 	};
 
-	// request/response round-trip (main asks renderer, e.g. OAuth code input)
-	const pendingRequests = new Map<string, (v: string | undefined) => void>();
-	let reqSeq = 0;
-	const requestInput = (kind: string, payload: unknown): Promise<string | undefined> => {
+	const requests = new InputRequests(
+		(request) => {
+			const win = getWindow();
+			if (!win || win.isDestroyed()) throw new Error("The application window is closed");
+			win.webContents.send("pi:request", request);
+		},
+		(id) => {
+			const win = getWindow();
+			if (win && !win.isDestroyed()) win.webContents.send("pi:request-dismiss", id);
+		},
+	);
+	const requestInput: InputBridge["requestInput"] = (kind, payload, options) => {
 		const win = getWindow();
 		if (!win || win.isDestroyed()) return Promise.resolve(undefined);
-		const id = `req${++reqSeq}`;
-		return new Promise((resolve) => {
-			pendingRequests.set(id, resolve);
-			win.webContents.send("pi:request", { id, kind, payload });
+		const cancel = () => requests.dismissAll();
+		const onNavigation = (_event: Electron.Event, _url: string, isInPlace: boolean, isMainFrame: boolean) => {
+			if (isMainFrame && !isInPlace) cancel();
+		};
+		win.webContents.once("destroyed", cancel);
+		win.webContents.once("render-process-gone", cancel);
+		win.webContents.on("did-start-navigation", onNavigation);
+		return requests.ask(kind, payload, options).finally(() => {
+			win.webContents.off("destroyed", cancel);
+			win.webContents.off("render-process-gone", cancel);
+			win.webContents.off("did-start-navigation", onNavigation);
 		});
 	};
-	// OAuth flows race a manual paste prompt against a local callback server. When
-	// the browser redirect completes first, resolve and close any still-open prompt.
-	const dismissInputs = () => {
-		if (pendingRequests.size === 0) return;
-		for (const resolve of pendingRequests.values()) resolve(undefined);
-		pendingRequests.clear();
-		const win = getWindow();
-		if (win && !win.isDestroyed()) win.webContents.send("pi:request-dismiss");
-	};
-	ipcMain.on("pi:respond", (_e, id: string, value: string | undefined) => {
-		const r = pendingRequests.get(id);
-		if (r) {
-			pendingRequests.delete(id);
-			r(value);
-		}
-	});
-
+	ipcMain.on("pi:respond", (_e, id: string, value: string | undefined) => requests.respond(id, value));
 	driver.oauthBridge = {
-		openExternal: (url) => shell.openExternal(url),
+		openExternal: (url) => { void shell.openExternal(url).catch((error) => send({ type: "error", message: error.message })); },
 		requestInput,
-		dismissInputs,
 	};
 
 	driver.setHandlers({
-		onMessages: (messages) => send({ type: "messages", messages }),
-		onMessagesPatch: (from, messages) => send({ type: "patch", from, messages }),
+		onMessages: (messages, sessionId) => send({ type: "messages", messages, sessionId }),
+		onMessagesPatch: (from, messages, sessionId) => send({ type: "patch", from, messages, sessionId }),
 		onState: (state) => send({ type: "state", state }),
-		onTasks: (tasks) => send({ type: "tasks", tasks }),
+		onTasks: (tasks, sessionId) => send({ type: "tasks", tasks, sessionId }),
 		onSessionUpdated: (path) => send({ type: "sessionUpdated", path }),
 		onRunComplete: (path) => {
 			send({ type: "sessionDone", path });
@@ -76,7 +75,6 @@ export function registerIpc(driver: Driver, getWindow: () => BrowserWindow | nul
 	// models
 	h("pi:listModels", () => driver.listModels());
 	h("pi:addModels", (models: any) => driver.addModels(models));
-	h("pi:removeModel", (provider: string, id: string) => driver.removeModel(provider, id));
 	h("pi:fetchRemoteModels", () => driver.fetchRemoteModels());
 	h("pi:fetchRemoteOpenAIModels", () => driver.fetchRemoteOpenAIModels());
 	h("pi:fetchRemoteAntigravityModels", () => driver.fetchRemoteAntigravityModels());
@@ -95,13 +93,12 @@ export function registerIpc(driver: Driver, getWindow: () => BrowserWindow | nul
 
 	// tasks
 	h("pi:getTasks", () => driver.getTasks());
-	h("pi:updateTask", (task: Task) => driver.updateTask(task));
-	h("pi:deleteTask", (id: string) => driver.deleteTask(id));
-	h("pi:extractTasks", () => driver.extractTasks());
+	h("pi:updateTask", (task: Task, sessionId: string) => driver.updateTask(task, sessionId));
+	h("pi:deleteTask", (id: string, sessionId: string) => driver.deleteTask(id, sessionId));
+	h("pi:extractTasks", (sessionId: string) => driver.extractTasks(sessionId));
 
 	// commands / workspaces / accounts
 	h("pi:getCommands", () => driver.getCommands());
-	h("pi:listWorkspaces", () => driver.listWorkspaces());
 	h("pi:getAccounts", () => driver.getAccounts());
 	h("pi:getAntigravitySettings", () => driver.getAntigravitySettings());
 	h("pi:saveAntigravitySettings", (input: AntigravitySettingsInput) => driver.saveAntigravitySettings(input));
@@ -125,7 +122,7 @@ export function registerIpc(driver: Driver, getWindow: () => BrowserWindow | nul
 	});
 
 	// conversation
-	h("pi:sendMessage", (text: string, images?: any) => driver.sendMessage(text, images));
+	h("pi:sendMessage", (text: string, images: any, sessionId: string | null) => driver.sendMessage(text, images, sessionId));
 	h("pi:abort", () => driver.abort());
 	h("pi:setModel", (provider: string, id: string) => driver.setModel(provider, id));
 	h("pi:setThinkingLevel", (level: any) => driver.setThinkingLevel(level));
@@ -136,7 +133,7 @@ export function registerIpc(driver: Driver, getWindow: () => BrowserWindow | nul
 	h("pi:getVersion", () => app.getVersion());
 	h("pi:checkForUpdate", () => checkForUpdate());
 	h("pi:installUpdate", (url: string) =>
-		downloadAndInstall(url, (phase, pct, message) => send({ type: "updateProgress", phase, pct, message })),
+		downloadAndInstall(url, (phase, pct, message) => send({ type: "updateProgress", phase, pct, message }), () => driver.shutdown()),
 	);
 
 	// misc

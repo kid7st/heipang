@@ -29,20 +29,18 @@ export function ModelManager({
 	const fetchRemote = async (provider: "anthropic" | "openai-codex" | "antigravity") => {
 		setBusy(true);
 		setErr(null);
-		const res =
-			provider === "openai-codex"
-				? await window.pi.fetchRemoteOpenAIModels()
-				: provider === "antigravity"
-					? await window.pi.fetchRemoteAntigravityModels()
-					: await window.pi.fetchRemoteModels();
-		setBusy(false);
-		if (!res.ok) {
-			setErr(res.error || "Failed to fetch models");
-			return;
+		try {
+			const res = provider === "openai-codex" ? await window.pi.fetchRemoteOpenAIModels()
+				: provider === "antigravity" ? await window.pi.fetchRemoteAntigravityModels() : await window.pi.fetchRemoteModels();
+			if (!res.ok) throw new Error(res.error || "Failed to fetch models");
+			setRemoteProvider(provider);
+			setRemote(res.models || []);
+			setRemoteSel(new Set());
+		} catch (error) {
+			setErr(error instanceof Error ? error.message : String(error));
+		} finally {
+			setBusy(false);
 		}
-		setRemoteProvider(provider);
-		setRemote(res.models || []);
-		setRemoteSel(new Set());
 	};
 
 	// Auto-pull the latest models when the Models tab opens, so recent models are
@@ -55,9 +53,15 @@ export function ModelManager({
 	const refreshLatest = async () => {
 		setBusy(true);
 		setErr(null);
-		await window.pi.refreshModelCatalog();
-		setBusy(false);
-		await fetchRemote(remoteProvider);
+		try {
+			const result = await window.pi.refreshModelCatalog();
+			if (!result.ok) throw new Error(result.error || "Failed to refresh model catalog");
+			await fetchRemote(remoteProvider);
+		} catch (error) {
+			setErr(error instanceof Error ? error.message : String(error));
+		} finally {
+			setBusy(false);
+		}
 	};
 
 	const addAndEnable = async (inputs: NewModelInput[]) => {
@@ -73,41 +77,32 @@ export function ModelManager({
 		const picks = remote.filter((m) => remoteSel.has(m.id));
 		if (picks.length === 0) return;
 		setBusy(true);
-		await addAndEnable(
-			picks.map((m) => ({
-				provider: m.provider || remoteProvider,
-				id: m.id,
-				name: m.display_name || m.id,
-				reasoning: m.reasoning ?? true,
-				contextWindow: m.contextWindow ?? (remoteProvider === "openai-codex" ? 272000 : 1000000),
-				maxTokens: m.maxTokens ?? (remoteProvider === "antigravity" ? 65536 : 128000),
-			})),
-		);
-		setBusy(false);
-		setRemote((r) => r?.map((x) => (remoteSel.has(x.id) ? { ...x, alreadyAdded: true } : x)) ?? null);
-		setRemoteSel(new Set());
+		setErr(null);
+		try {
+			await addAndEnable(picks.map((model) => ({ provider: model.provider || remoteProvider, id: model.id })));
+			setRemote((current) => current?.map((model) => remoteSel.has(model.id) ? { ...model, alreadyAdded: true } : model) ?? null);
+			setRemoteSel(new Set());
+		} catch (error) {
+			setErr(error instanceof Error ? error.message : String(error));
+		} finally {
+			setBusy(false);
+		}
 	};
 
 	const addManual = async () => {
 		if (!mId.trim()) return;
 		setBusy(true);
-		const codex = mProvider === "openai-codex";
-		const deepseek = mProvider === "deepseek";
-		const antigravity = mProvider === "antigravity";
-		await addAndEnable([
-			{
-				provider: mProvider,
-				id: mId.trim(),
-				name: mName.trim() || mId.trim(),
-				reasoning: true,
-				contextWindow: codex ? (/gpt-5\.6/i.test(mId.trim()) ? 1000000 : 272000) : 1000000,
-				maxTokens: deepseek ? 384000 : antigravity ? 65536 : 128000,
-			},
-		]);
-		setBusy(false);
-		setMId("");
-		setMName("");
-		setShowAdd(false);
+		setErr(null);
+		try {
+			await addAndEnable([{ provider: mProvider, id: mId.trim(), name: mName.trim() || undefined }]);
+			setMId("");
+			setMName("");
+			setShowAdd(false);
+		} catch (error) {
+			setErr(error instanceof Error ? error.message : String(error));
+		} finally {
+			setBusy(false);
+		}
 	};
 
 	const setDefault = async (provider: string, id: string) => onChanged(await window.pi.setDefaultModel(provider, id));

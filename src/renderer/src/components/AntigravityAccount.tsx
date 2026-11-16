@@ -15,7 +15,7 @@ export function AntigravityAccount({ connected, onChanged }: { connected: boolea
 			setUrl(settings.relayUrl);
 			setHasKey(settings.hasKey);
 			setLoaded(true);
-			setError("");
+			setError(settings.error ?? "");
 		} catch (error) {
 			setError(String(error));
 		}

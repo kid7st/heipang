@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { createJiti } from "jiti";
 import { gzipSync, brotliCompressSync } from "node:zlib";
-import { mkdtemp, mkdir, writeFile, appendFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile, appendFile, rm } from "node:fs/promises";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { tmpdir } from "node:os";
 import { resolve, join } from "node:path";
 import { Worker } from "node:worker_threads";
@@ -46,8 +47,38 @@ try {
 	result = await scan();
 	assert.equal(result.items[0].name, "Renamed");
 	assert.equal(result.items[0].messageCount, 1);
-	await rm(file);
+	const healthyFile = join(root, "workspace", "healthy.jsonl");
+	await writeFile(healthyFile, [header, user].map(JSON.stringify).join("\n") + "\n");
+	await writeFile(file, JSON.stringify(header) + '\ninvalid middle entry\n' + JSON.stringify(user) + '\n');
+	result = await scan();
+	assert.deepEqual(result.items.map((item) => item.path), [healthyFile]);
+	assert.equal(result.errors.length, 1);
+	assert.ok(result.errors[0].includes(file));
+	assert.match(result.errors[0], /Invalid JSON before the final session line/);
+	const interrupted = SessionManager.create("/workspace", join(root, "workspace"));
+	interrupted.appendMessage({ role: "user", content: "Before crash", timestamp: Date.now() });
+	const interruptedFile = interrupted.getSessionFile();
+	await appendFile(interruptedFile, '{"type":"message",');
+	const resumed = SessionManager.open(interruptedFile);
+	resumed.appendSessionInfo("Resumed after crash");
+	resumed.appendMessage({ role: "user", content: "After crash", timestamp: Date.now() });
+	assert.equal(SessionManager.open(interruptedFile).getEntries().filter((entry) => entry.type === "message").length, 2);
+	const interruptedContents = await readFile(interruptedFile, "utf8");
+	result = await scan();
+	assert.deepEqual(result.items.map((item) => item.path), [healthyFile]);
+	assert.equal(result.errors.length, 2);
+	assert.ok(result.errors.some((error) => error.includes(interruptedFile)));
+	assert.equal(await readFile(interruptedFile, "utf8"), interruptedContents);
+	await rm(interruptedFile);
+	await writeFile(file, [header, user].map(JSON.stringify).join('\n') + '\n');
+	result = await scan();
+	assert.equal(result.items.length, 2);
+	assert.deepEqual(result.errors, []);
+	await rm(file); await rm(healthyFile);
 	assert.equal((await scan()).items.length, 0);
+	await rm(root, { recursive: true });
+	await writeFile(root, "Not a directory");
+	assert.match((await scan()).error, /ENOTDIR/);
 } finally { await worker.terminate(); await rm(root, { recursive: true, force: true }); }
 
 // Timing instrumentation must preserve all stream events and final result.
@@ -69,6 +100,13 @@ const asyncOutput = measuredStream(Promise.resolve(asyncUpstream), { provider: "
 asyncUpstream.push({ type: "done", reason: "stop", message });
 asyncUpstream.end();
 assert.equal(await asyncOutput.result(), message);
+const broken = measuredStream({
+	async *[Symbol.asyncIterator]() { throw new Error("fixture iterator failure"); },
+	result: () => new Promise(() => {}),
+}, { provider: "test", id: "test" }, {}, join(temp, "timings.jsonl"));
+const failed = await Promise.race([broken.result(), new Promise((_, reject) => setTimeout(() => reject(new Error("Stream did not settle")), 1000))]);
+assert.equal(failed.stopReason, "error");
+assert.equal(failed.errorMessage, "fixture iterator failure");
 // A silent server is retryable; a human pressing Stop remains aborted.
 const keepAlive = setInterval(() => {}, 1000);
 try {
@@ -97,7 +135,42 @@ const shimRoot = await mkdtemp(join(tmpdir(), "heipang-driver-test-"));
 const shim = join(shimRoot, "electron.mjs");
 await writeFile(shim, "export const nativeImage = {};\n");
 const { Driver } = await createJiti(import.meta.url, { alias: { electron: shim } }).import(resolve("src/main/driver.ts"));
+const indexRoot = await mkdtemp(join(tmpdir(), "heipang-index-driver-test-"));
+await mkdir(join(indexRoot, "workspace"));
+const indexedHealthy = join(indexRoot, "workspace", "healthy.jsonl");
+const indexedBroken = join(indexRoot, "workspace", "broken.jsonl");
+await writeFile(indexedHealthy, [header, user].map(JSON.stringify).join("\n") + "\n");
+await writeFile(indexedBroken, JSON.stringify(header) + "\ninvalid middle entry\n" + JSON.stringify(user) + "\n");
+const indexDriver = Object.create(Driver.prototype);
+indexDriver.sessionIndexWorker = new Worker(resolve("out/main/session-index-worker.js"), { workerData: { sessionDir: indexRoot } });
+const indexErrors = [];
+indexDriver.onError = (error) => indexErrors.push(error);
+try {
+	assert.deepEqual((await indexDriver.listSessions()).map((item) => item.path), [indexedHealthy]);
+	assert.ok(indexErrors[0].includes(indexedBroken));
+	assert.match(indexErrors[0], /Invalid JSON before the final session line/);
+	assert.equal(indexDriver.sessionListCache, undefined);
+	await indexDriver.listSessions();
+	assert.equal(indexErrors.length, 2);
+	await writeFile(indexedBroken, [header, user].map(JSON.stringify).join("\n") + "\n");
+	const repaired = await indexDriver.listSessions();
+	assert.equal(repaired.length, 2);
+	assert.equal(await indexDriver.listSessions(), repaired);
+	assert.equal(indexErrors.length, 2);
+	await rm(indexRoot, { recursive: true });
+	await writeFile(indexRoot, "Not a directory");
+	indexDriver.invalidateSessionList();
+	await assert.rejects(indexDriver.listSessions(), /ENOTDIR/);
+} finally {
+	await indexDriver.sessionIndexWorker.terminate();
+	await rm(indexRoot, { recursive: true, force: true });
+}
 const driver = Object.create(Driver.prototype);
+driver.sessionTasks = new WeakMap();
+driver.sessionControllers = new Map();
+driver.sessionOperations = new WeakMap();
+driver.sessionShutdownErrors = new WeakMap();
+driver.releasingSessions = new WeakMap();
 driver.sentUiCount = 0; driver.sentRawCount = 0; driver.sentTailUiCount = 0;
 driver.session = { messages: [] };
 let ui = [];
@@ -133,15 +206,19 @@ assert.equal(finished, 1);
 
 let disposed = 0;
 driver.session = { sessionId: "background", sessionFile: "background", isIdle: false, isStreaming: false,
-	subscribe: (callback) => { listener = callback; return () => {}; }, dispose: () => { disposed++; } };
+	modelRuntime: { settleCredentialWrites: async () => {} },
+	subscribe: (callback) => { listener = callback; return () => {}; }, abort: async () => {}, dispose: () => { disposed++; } };
 driver.bgSessions = new Map();
 driver.clearSessionUiState = () => {};
+driver.tasksFor = () => undefined;
 driver.emitBackground = () => {};
-driver.leaveCurrent();
+const backgroundSession = driver.session;
+await driver.leaveCurrent();
 assert.equal(driver.bgSessions.size, 1); // a sleeping retry must remain alive
 listener({ type: "agent_end" });
 assert.equal(disposed, 0);
 listener({ type: "agent_settled" });
+await driver.releasingSessions.get(backgroundSession);
 assert.equal(disposed, 1);
 await rm(shimRoot, { recursive: true, force: true });
 console.log("PASS: decoding isolation, PDF conversion, incremental index, stream fidelity, IPC cursor, settlement lifecycle");

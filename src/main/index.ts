@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { app, BrowserWindow, nativeImage, shell } from "electron";
+import { app, BrowserWindow, dialog, nativeImage, shell } from "electron";
 import { Driver } from "./driver.js";
 import { registerIpc } from "./ipc.js";
 import { installStreamDecompressionFix } from "./provider-compat.js";
@@ -71,6 +71,20 @@ app.whenReady().then(() => {
 	}
 	const driver = new Driver();
 	registerIpc(driver, () => mainWindow);
+	let quitting = false;
+	let canQuit = false;
+	app.on("before-quit", (event) => {
+		if (canQuit) return;
+		event.preventDefault();
+		if (quitting) return;
+		quitting = true;
+		const finish = () => { canQuit = true; app.quit(); };
+		void driver.shutdown().then(finish, (error) => {
+			console.error("Session cleanup failed during application shutdown", error);
+			dialog.showErrorBox("Could not save all session state", error instanceof Error ? error.message : String(error));
+			finish();
+		});
+	});
 
 	createWindow();
 

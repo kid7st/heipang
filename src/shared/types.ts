@@ -17,7 +17,7 @@ export interface ThinkingContent {
 export interface ImageContent {
 	// Kept as "image" for compatibility with pi's current attachment channel.
 	// application/pdf is also carried here and patched into Anthropic's document
-	// block by scripts/patch-pi-pdf.mjs.
+	// block by the outgoing payload hook in src/main/provider-compat.ts.
 	type: "image";
 	data: string;
 	mimeType: string;
@@ -106,10 +106,10 @@ export interface RemoteModel {
 export interface NewModelInput {
 	provider: string;
 	id: string;
-	name: string;
-	reasoning: boolean;
-	contextWindow: number;
-	maxTokens: number;
+	name?: string;
+	reasoning?: boolean;
+	contextWindow?: number;
+	maxTokens?: number;
 }
 
 export interface SessionListItem {
@@ -182,17 +182,12 @@ export interface AccountInfo {
 export interface AntigravitySettings {
 	relayUrl: string;
 	hasKey: boolean;
+	error?: string;
 }
 
 export interface AntigravitySettingsInput {
 	relayUrl: string;
 	relayKey: string;
-}
-
-export interface WorkspaceInfo {
-	cwd: string;
-	name: string;
-	lastUsed: number;
 }
 
 export interface PiSettings {
@@ -252,21 +247,31 @@ export interface OpenSessionResult {
 
 // Streaming events forwarded to the renderer.
 export type StreamEvent =
-	| { type: "messages"; messages: UIMessage[] } // full snapshot (on open / structural change)
-	| { type: "patch"; from: number; messages: UIMessage[] } // incremental tail during streaming
+	| { type: "messages"; messages: UIMessage[]; sessionId: string } // full snapshot (on open / structural change)
+	| { type: "patch"; from: number; messages: UIMessage[]; sessionId: string } // incremental tail during streaming
 	| { type: "state"; state: ActiveState }
-	| { type: "tasks"; tasks: Task[] }
+	| { type: "tasks"; tasks: Task[]; sessionId: string }
 	| { type: "sessionUpdated"; path?: string } // a message was persisted; refresh the sidebar list
 	| { type: "sessionDone"; path?: string }
 	| { type: "background"; sessions: { path: string; cwd: string }[] } // sessions still running in the background
 	| { type: "updateProgress"; phase: "download" | "install" | "relaunch" | "error"; pct?: number; message?: string }
 	| { type: "error"; message: string };
 
+export interface InputRequest {
+	id: string;
+	kind: "select" | "code" | "secret" | "prompt";
+	payload: {
+		message: string;
+		title?: string;
+		placeholder?: string;
+		options?: { id: string; label: string }[];
+	};
+}
+
 export interface PiApi {
 	// models
 	listModels(): Promise<ModelsPayload>;
 	addModels(models: NewModelInput[]): Promise<ModelsPayload>;
-	removeModel(provider: string, id: string): Promise<ModelsPayload>;
 	fetchRemoteModels(): Promise<{ ok: boolean; models?: RemoteModel[]; error?: string }>;
 	fetchRemoteOpenAIModels(): Promise<{ ok: boolean; models?: RemoteModel[]; error?: string }>;
 	fetchRemoteAntigravityModels(): Promise<{ ok: boolean; models?: RemoteModel[]; error?: string }>;
@@ -278,7 +283,7 @@ export interface PiApi {
 	openSession(path: string): Promise<OpenSessionResult>;
 	newSession(cwd?: string): Promise<OpenSessionResult>;
 	// conversation
-	sendMessage(text: string, images?: ImageAttachment[]): Promise<void>;
+	sendMessage(text: string, images: ImageAttachment[] | undefined, sessionId: string | null): Promise<void>;
 	abort(): Promise<void>;
 	setModel(provider: string, id: string): Promise<ActiveState>;
 	setThinkingLevel(level: ThinkingLevel): Promise<ActiveState>;
@@ -293,12 +298,11 @@ export interface PiApi {
 	renameSession(path: string, name: string): Promise<void>;
 	// tasks
 	getTasks(): Promise<Task[]>;
-	updateTask(task: Task): Promise<Task[]>;
-	deleteTask(id: string): Promise<Task[]>;
-	extractTasks(): Promise<{ ok: boolean; tasks?: Task[]; error?: string }>;
+	updateTask(task: Task, sessionId: string): Promise<Task[]>;
+	deleteTask(id: string, sessionId: string): Promise<Task[]>;
+	extractTasks(sessionId: string): Promise<{ ok: boolean; tasks?: Task[]; error?: string }>;
 	// commands / workspaces / accounts
 	getCommands(): Promise<CommandInfo[]>;
-	listWorkspaces(): Promise<WorkspaceInfo[]>;
 	getAccounts(): Promise<AccountInfo[]>;
 	getAntigravitySettings(): Promise<AntigravitySettings>;
 	saveAntigravitySettings(input: AntigravitySettingsInput): Promise<{ ok: boolean; error?: string; warning?: string }>;
@@ -310,8 +314,8 @@ export interface PiApi {
 	writeMemory(content: string, cwd?: string): Promise<void>;
 	deleteExtension(path: string): Promise<void>;
 	deleteSkill(filePath: string): Promise<void>;
-	onRequest(cb: (req: { id: string; kind: string; payload: any }) => void): () => void;
-	onRequestDismiss(cb: () => void): () => void;
+	onRequest(cb: (req: InputRequest) => void): () => void;
+	onRequestDismiss(cb: (id: string) => void): () => void;
 	respondRequest(id: string, value: string | undefined): void;
 	// resources & settings
 	getResources(): Promise<ResourcesPayload>;

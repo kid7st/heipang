@@ -20,6 +20,9 @@ export const safeStorage = {
 `);
 const { Driver } = await createJiti(import.meta.url, { alias: { electron: shim } }).import(resolve("src/main/driver.ts"));
 const driver = Object.create(Driver.prototype);
+driver.bgSessions = new Map();
+driver.shutdownController = new AbortController();
+driver.sessionShutdownErrors = new WeakMap();
 
 const settingsJiti = createJiti(import.meta.url, { alias: { electron: shim } });
 const { AntigravitySettingsStore } = await settingsJiti.import(resolve("src/main/antigravity-settings.ts"));
@@ -50,6 +53,15 @@ const persisted = await readFile(join(root, "heipang-antigravity.json"), "utf8")
 assert.ok(!persisted.includes("secret-key"));
 assert.equal((await stat(join(root, "heipang-antigravity.json"))).mode & 0o777, 0o600);
 assert.deepEqual(new AntigravitySettingsStore(root).get(), store.get());
+for (const damaged of ['{"truncated":', JSON.stringify({ url: "https://relay.example.test", encryptedKey: "" })]) {
+ await writeFile(join(root, "heipang-antigravity.json"), damaged);
+ const recovered = new AntigravitySettingsStore(root).get();
+ assert.equal(recovered.hasKey, false);
+ assert.match(recovered.error, /original file has been kept/);
+ assert.equal(await readFile(join(root, "heipang-antigravity.json"), "utf8"), damaged);
+}
+await writeFile(join(root, "heipang-antigravity.json"), persisted);
+new AntigravitySettingsStore(root);
 projectReply();
 await store.save({ relayUrl: "https://relay.example.test", relayKey: "" });
 projectReply();
@@ -136,7 +148,9 @@ assert.equal(extensions.runtime.pendingProviderRegistrations.length, 0);
 
 // Verify remote Antigravity models discovery / fallback
 driver.settings = { getEnabledModels: () => [] };
-driver.providerApiKey = async () => undefined;
+const { ModelCatalog } = await settingsJiti.import(resolve("src/main/model-catalog.ts"));
+driver.catalog = new ModelCatalog(root, driver.runtime, driver.settings);
+driver.catalog.providerApiKey = async () => undefined;
 const remoteRes = await driver.fetchRemoteAntigravityModels();
 assert.equal(remoteRes.ok, true);
 assert.ok(remoteRes.models.length > 0);
@@ -193,7 +207,7 @@ assert.deepEqual(thinkingWire("gemini-4-argon-low", "off"), { includeThoughts: f
 resetAntigravityCatalogForTests();
 
 const { renameHarness } = await jiti.import(resolve("src/main/antigravity/wire/system-prompt.ts"));
-const { buildRequest } = await jiti.import(resolve("src/main/antigravity/stream/stream.ts"));
+const { buildRequest, convertMessages } = await jiti.import(resolve("src/main/antigravity/stream/stream.ts"));
 const docsBlurb = "codemode scripts and non-LLM models such as classifiers and image models";
 const docsLine = `- When asked about: MCP servers (docs/mcp.md), ${docsBlurb} (docs/codemode.md)`;
 const shortenedDocsLine = "- When asked about: MCP servers (docs/mcp.md), codemode scripts (docs/codemode.md)";
@@ -229,6 +243,55 @@ const skillRequest = buildRequest(promptModel, skillContext, "project-1", {}, "g
 assert.equal(skillRequest.request.systemInstruction.parts[1].text, '<skill name="docs">Inside antigravity. codemode scripts</skill>');
 assert.equal(skillRequest.request.contents[0].parts[0].text.trim(), userText);
 
+const image = { type: "image", data: "data:image/png;base64,iVBORw0KGgo=", mimeType: "image/png" };
+const toolCall = {
+	role: "assistant", api: "antigravity-api", provider: "antigravity", model: promptModel.id, timestamp: 1,
+	stopReason: "toolUse", content: [{ type: "toolCall", id: "call-shot", name: "screenshot", arguments: {}, thoughtSignature: "YWJjZA==" }],
+	usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+};
+const toolResult = {
+	role: "toolResult", toolCallId: "call-shot", toolName: "screenshot", timestamp: 1, isError: false,
+	content: [{ type: "text", text: "captured" }, image],
+};
+const imageContext = { messages: [{ role: "user", content: "Take a screenshot", timestamp: 1 }, toolCall, toolResult] };
+const imageSnapshot = JSON.stringify(imageContext);
+const imageContents = convertMessages(promptModel, imageContext, "gemini-3.8-flash-low");
+assert.deepEqual(imageContents.map(turn => turn.role), ["user", "model", "model", "user"]);
+assert.deepEqual(imageContents[2].parts, [{ functionResponse: { id: "call-shot", name: "screenshot", response: { output: "captured" } } }]);
+assert.deepEqual(imageContents[3].parts, [{ inlineData: { mimeType: "image/png", data: "iVBORw0KGgo=" } }]);
+assert.equal(JSON.stringify(imageContext), imageSnapshot);
+const parallelContext = {
+	messages: [imageContext.messages[0], { ...toolCall, content: [...toolCall.content, { ...toolCall.content[0], id: "call-second" }] },
+		toolResult, { ...toolResult, toolCallId: "call-second", content: [{ type: "image", data: "anBlZw==", mimeType: "image/jpeg" }] }],
+};
+const parallelContents = convertMessages(promptModel, parallelContext, "gemini-3.8-flash-low");
+assert.deepEqual(parallelContents.map(turn => turn.role), ["user", "model", "model", "user"]);
+assert.deepEqual(parallelContents[2].parts.map(part => part.functionResponse.id), ["call-shot", "call-second"]);
+assert.deepEqual(parallelContents[3].parts.map(part => part.inlineData.mimeType), ["image/png", "image/jpeg"]);
+const laterAssistant = { ...toolCall, content: [{ type: "text", text: "Screenshot reviewed" }], stopReason: "stop" };
+const continuedContents = convertMessages(promptModel, { messages: [...parallelContext.messages, laterAssistant] }, "gemini-3.8-flash-low");
+assert.deepEqual(continuedContents.slice(0, 4), parallelContents);
+assert.deepEqual(continuedContents[4], { role: "model", parts: [{ text: "Screenshot reviewed" }] });
+const followingUser = convertMessages(promptModel, { messages: [...imageContext.messages, { role: "user", content: "Describe it", timestamp: 2 }] }, "gemini-3.8-flash-low");
+assert.deepEqual(followingUser.at(-1).parts, [...imageContents[3].parts, { text: "Describe it" }]);
+const textContents = convertMessages(promptModel, { messages: [...imageContext.messages.slice(0, 2), { ...toolResult, content: toolResult.content.slice(0, 1) }] }, "gemini-3.8-flash-low");
+assert.deepEqual(textContents.map(turn => turn.role), ["user", "model", "model"]);
+const failedContents = convertMessages(promptModel, { messages: [...imageContext.messages.slice(0, 2), { ...toolResult, isError: true }] }, "gemini-3.8-flash-low");
+assert.deepEqual(failedContents[2].parts[0].functionResponse.response, { error: "captured" });
+assert.deepEqual(failedContents[3], imageContents[3]);
+for (const runtimeModel of ["claude-sonnet-4-6", "gpt-oss-120b-medium"]) {
+	const contents = convertMessages(promptModel, imageContext, runtimeModel);
+	assert.deepEqual(contents.map(turn => turn.role), ["user", "model", "user"]);
+	assert.deepEqual(contents[2].parts, [...imageContents[2].parts, ...imageContents[3].parts]);
+}
+const unsignedContents = convertMessages(promptModel, { messages: [imageContext.messages[0], { ...toolCall, content: [{ ...toolCall.content[0], thoughtSignature: undefined }] }, toolResult] }, "gemini-3.8-flash-low");
+assert.equal(unsignedContents.length, 1);
+assert.equal(unsignedContents[0].role, "user");
+assert.ok(unsignedContents[0].parts.some(part => part.inlineData?.mimeType === "image/png"));
+assert.ok(unsignedContents[0].parts.every(part => !("functionResponse" in part)));
+const userImageContents = convertMessages(promptModel, { messages: [{ role: "user", content: [{ type: "text", text: "Describe this" }, image], timestamp: 1 }] }, "gemini-3.8-flash-low");
+assert.deepEqual(userImageContents, [{ role: "user", parts: [{ text: "Describe this" }, ...imageContents[3].parts] }]);
+
 const sessionMock = new MockAgent();
 sessionMock.disableNetConnect();
 setGlobalDispatcher(sessionMock);
@@ -256,6 +319,8 @@ const { session } = await createAgentSession({
 });
 session.setActiveToolsByName(["read"]);
 driver.agentDir = root;
+driver.sessionControllers = new Map([[session, new AbortController()]]);
+driver.sessionOperations = new WeakMap();
 driver.installSessionGuards(session);
 try {
 	assert.match(session.systemPrompt, /inside pi,/);
@@ -276,6 +341,32 @@ try {
 	assert.deepEqual(sessionRequests[1].tools.flatMap((group) => group.functionDeclarations.map((tool) => tool.name)), ["read", "bash"]);
 	assert.match(sessionRequests[1].systemInstruction.parts[0].text, /inside antigravity,/);
 	assert.ok(!sessionRequests[1].systemInstruction.parts[0].text.includes(docsBlurb));
+	const sdkImageContext = { messages: [imageContext.messages[0], { ...toolCall, model: session.model.id }, toolResult] };
+	const imageAnswer = await runtime.completeSimple(session.model, sdkImageContext, { sessionId: "tool-image-regression" });
+	assert.equal(imageAnswer.stopReason, "stop", imageAnswer.errorMessage);
+	assert.deepEqual(sessionRequests.at(-1).contents, imageContents);
+	driver.sessionTasks = new WeakMap();
+	driver.releasingSessions = new WeakMap();
+	await writeFile(join(root, "settings.json"), JSON.stringify({ cacheWarming: "off", retry: { enabled: false } }));
+	const liveA = (await driver.createSession(root, new AbortController(), SessionManager.inMemory(root))).session;
+	const liveB = (await driver.createSession(root, new AbortController(), SessionManager.inMemory(root))).session;
+	try {
+		assert.notEqual(liveA.modelRuntime, liveB.modelRuntime);
+		for (const current of [liveA, liveB]) {
+			const selected = current.modelRuntime.getModels("antigravity")[0];
+			assert.ok(selected, "The built-in extension must register Antigravity models");
+			await current.setModel(selected);
+			current.setThinkingLevel("off");
+		}
+		await Promise.all([liveA.prompt("Session A"), liveB.prompt("Session B")]);
+		assert.equal(liveA.getLastAssistantText(), "Session response");
+		assert.equal(liveB.getLastAssistantText(), "Session response");
+		for (const current of [liveA, liveB]) {
+			assert.equal(current.sessionManager.getBranch().filter((entry) => entry.customType === "antigravity.request-state").length, 1);
+		}
+	} finally {
+		await Promise.all([driver.releaseSession(liveA), driver.releaseSession(liveB)]);
+	}
 	sessionMock.assertNoPendingInterceptors();
 } finally {
 	session.dispose();
@@ -283,4 +374,4 @@ try {
 	await sessionMock.close();
 	await rm(root, { recursive: true, force: true });
 }
-console.log("PASS: Antigravity relay validation, encrypted persistence, project isolation, legacy credential override, model availability, Gemini 4 routing, SDK session/tool updates and system prompt normalization");
+console.log("PASS: Antigravity relay validation, encrypted persistence, project isolation, legacy credential override, model availability, Gemini 4 routing, SDK session/tool updates, Gemini tool-result image turns and system prompt normalization");

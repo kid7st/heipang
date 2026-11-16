@@ -81,13 +81,15 @@ for (const authenticated of [false, true]) {
 }
 assert.equal(isPresetModel({ ...defaults[0], provider: "antigravity" }), false);
 const driver = Object.create(Driver.prototype);
+driver.shutdownController = new AbortController();
 let persisted = false;
 let secretKind;
-driver.oauthBridge = { requestInput: async (kind) => { secretKind = kind; return "fixture-key"; }, dismissInputs: () => {}, openExternal: () => {} };
+driver.oauthBridge = { requestInput: async (kind) => { secretKind = kind; return "fixture-key"; }, openExternal: () => {} };
 driver.runtime = async () => ({
 	getModels: (provider) => runtime.getModels(provider),
 	login: async (_id, type, interaction) => {
 		assert.equal(type, "api_key");
+		assert.ok(interaction.signal);
 		await interaction.prompt({ type: "secret", message: "Enter key" });
 		persisted = true;
 	},
@@ -117,5 +119,19 @@ try {
 	assert.equal(persisted, false);
 	assert.equal(rejected.error.includes("fixture-key"), false);
 	assert.match(rejected.error, /401/);
+	let startVerification;
+	const verificationStarted = new Promise((resolve) => { startVerification = resolve; });
+	globalThis.fetch = (_url, options) => new Promise((_resolve, reject) => {
+		options.signal.addEventListener("abort", () => reject(options.signal.reason), { once: true });
+		startVerification();
+	});
+	const interrupted = driver.loginAccount("deepseek");
+	await verificationStarted;
+	driver.shutdownController.abort(new Error("fixture shutdown during verification"));
+	const cancelled = await interrupted;
+	assert.equal(cancelled.ok, false);
+	assert.match(cancelled.error, /fixture shutdown during verification/);
+	assert.equal(persisted, false);
+	assert.equal(driver.loginController, undefined);
 } finally { globalThis.fetch = originalFetch; await rm(root, { recursive: true, force: true }); }
 console.log("PASS: default DeepSeek model selection, Flash/Pro modes, tool reasoning round-trip, Flash-only API keys, secure API-key validation, no key leakage");
