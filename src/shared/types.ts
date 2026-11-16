@@ -144,6 +144,8 @@ export interface ExtensionItem {
 	tools: string[];
 	commands: string[];
 	error?: string;
+	disabled?: boolean;
+	builtin?: boolean;
 }
 
 export interface SkillItem {
@@ -204,6 +206,7 @@ export interface GuiSettings {
 	sidebarWidth: number;
 	rightPanelWidth: number;
 	sidebarCollapsed: boolean;
+	disabledExtensions: string[];
 }
 
 export interface UpdateCheck {
@@ -313,6 +316,7 @@ export interface PiApi {
 	readMemory(cwd?: string): Promise<string>;
 	writeMemory(content: string, cwd?: string): Promise<void>;
 	deleteExtension(path: string): Promise<void>;
+	setExtensionDisabled(path: string, disabled: boolean): Promise<ResourcesPayload>;
 	deleteSkill(filePath: string): Promise<void>;
 	onRequest(cb: (req: InputRequest) => void): () => void;
 	onRequestDismiss(cb: (id: string) => void): () => void;

@@ -1,3 +1,4 @@
+import { resolve } from "node:path";
 import { DefaultResourceLoader, hasTrustRequiringProjectResources, ProjectTrustStore, SettingsManager } from "@earendil-works/pi-coding-agent";
 import type { InputBridge } from "./input-requests.js";
 import antigravityExtension from "./antigravity/index.js";
@@ -5,7 +6,11 @@ import antigravitySearch from "./antigravity/features/google-search.js";
 import antigravityImage from "./antigravity/features/generate-image.js";
 import { preferBuiltinAntigravity } from "./builtin-antigravity.js";
 
-export function createSessionResources(cwd: string, agentDir: string) {
+function extensionKeys(path: string): string[] {
+	return path.startsWith("<") || path.startsWith("builtin:") ? [path] : [path, resolve(path)];
+}
+
+export function createSessionResources(cwd: string, agentDir: string, getDisabledExtensions?: () => string[]) {
 	const settingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted: false });
 	const retrySettings = settingsManager.getRetrySettings.bind(settingsManager);
 	settingsManager.getRetrySettings = () => {
@@ -13,17 +18,46 @@ export function createSessionResources(cwd: string, agentDir: string) {
 		return { ...policy, maxRetries: Math.min(policy.maxRetries, 2) };
 	};
 	settingsManager.getHttpIdleTimeoutMs = () => 120_000;
+	const wrapSettings = <T extends { extensions?: string[] }>(getSettings: () => T): (() => T) => () => {
+		const base = getSettings();
+		const disabled = (getDisabledExtensions?.() ?? []).map((path) => `-${path}`);
+		if (disabled.length === 0) return base;
+		return { ...base, extensions: [...(base.extensions ?? []), ...disabled] };
+	};
+	settingsManager.getGlobalSettings = wrapSettings(settingsManager.getGlobalSettings.bind(settingsManager));
+	settingsManager.getProjectSettings = wrapSettings(settingsManager.getProjectSettings.bind(settingsManager));
+
 	const resourceLoader = new DefaultResourceLoader({
 		cwd, agentDir, settingsManager,
 		extensionFactories: [antigravityExtension, antigravitySearch, antigravityImage],
-		extensionsOverride: preferBuiltinAntigravity,
+		extensionsOverride: (base) => {
+			const result = preferBuiltinAntigravity(base);
+			const disabled = new Set((getDisabledExtensions?.() ?? []).flatMap(extensionKeys));
+			if (disabled.size === 0) return result;
+			const isDisabled = (path?: string) => !!path && extensionKeys(path).some((key) => disabled.has(key));
+			result.extensions = result.extensions.filter((ext) => !isDisabled(ext.path) && !isDisabled(ext.resolvedPath));
+			result.errors = result.errors.filter((error) => !isDisabled(error.path));
+			result.runtime.pendingProviderRegistrations = result.runtime.pendingProviderRegistrations.filter(
+				(registration) => !isDisabled(registration.extensionPath),
+			);
+			result.runtime.pendingNativeProviderRegistrations = result.runtime.pendingNativeProviderRegistrations.filter(
+				(registration) => !isDisabled(registration.extensionPath),
+			);
+			return result;
+		},
 	});
 	return { settingsManager, resourceLoader };
 }
 
-export async function loadSessionResources(cwd: string, agentDir: string, bridge: InputBridge | undefined, signal: AbortSignal) {
+export async function loadSessionResources(
+	cwd: string,
+	agentDir: string,
+	bridge: InputBridge | undefined,
+	signal: AbortSignal,
+	getDisabledExtensions?: () => string[],
+) {
 	signal.throwIfAborted();
-	const resources = createSessionResources(cwd, agentDir);
+	const resources = createSessionResources(cwd, agentDir, getDisabledExtensions);
 	const store = new ProjectTrustStore(agentDir);
 	let trusted = store.get(cwd);
 	if (trusted === null) {
