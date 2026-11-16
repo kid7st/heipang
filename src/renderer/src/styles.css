@@ -1071,10 +1071,22 @@ select {
 .res-card.has-error {
 	border-color: var(--danger);
 }
+.res-card.is-disabled {
+	opacity: 0.65;
+}
 .res-tags {
 	display: flex;
 	gap: 6px;
 	flex-wrap: wrap;
+}
+.res-actions {
+	margin-top: auto;
+	padding-top: 4px;
+	display: flex;
+	justify-content: flex-start;
+}
+.res-actions .btn {
+	margin-left: 0;
 }
 .account-card {
 	gap: 6px;

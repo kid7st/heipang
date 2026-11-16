@@ -35,6 +35,7 @@ import type {
 	AntigravitySettingsInput,
 	ActiveState,
 	CommandInfo,
+	ExtensionItem,
 	GuiSettings,
 	ModelInfo,
 	ModelsPayload,
@@ -64,6 +65,7 @@ const DEFAULT_GUI_SETTINGS: GuiSettings = {
 	sidebarWidth: 280,
 	rightPanelWidth: 320,
 	sidebarCollapsed: false,
+	disabledExtensions: [],
 };
 
 // Retain version-gate recovery until its original failure is verified against the bundled SDK.
@@ -253,11 +255,11 @@ export class Driver {
 		this.agentDir = getAgentDir();
 		this.antigravitySettings = new AntigravitySettingsStore(this.agentDir);
 		this.modelRuntimePromise = this.createModelRuntime();
-		const resources = createSessionResources(homedir(), this.agentDir);
+		this.guiSettings = this.loadGuiSettings();
+		const resources = createSessionResources(homedir(), this.agentDir, () => this.guiSettings?.disabledExtensions ?? []);
 		this.settings = resources.settingsManager;
 		this.catalogLoader = resources.resourceLoader;
 		this.catalog = new ModelCatalog(this.agentDir, () => this.runtime(), this.settings, this.shutdownController.signal);
-		this.guiSettings = this.loadGuiSettings();
 		void this.catalog.loadCatalog();
 	}
 
@@ -289,18 +291,45 @@ export class Driver {
 		const ext = resourceLoader.getExtensions();
 		const skillsRes = resourceLoader.getSkills();
 		const errByPath = new Map(ext.errors.map((e) => [e.path, e.error]));
-		return {
-			extensions: ext.extensions.filter((e) => !isAbsolute(e.resolvedPath) || existsSync(e.resolvedPath)).map((e) => ({
+		const disabledList = this.guiSettings?.disabledExtensions ?? [];
+		const disabledKeys = new Set(disabledList.flatMap((path) => isAbsolute(path) ? [path, resolve(path)] : [path]));
+		const isDisabled = (path: string) => disabledKeys.has(path) || (isAbsolute(path) && disabledKeys.has(resolve(path)));
+		const isBuiltin = (path: string) => path.startsWith("<") || path.startsWith("builtin:");
+		const extensions: ExtensionItem[] = ext.extensions
+			.filter((e) => !isDisabled(e.path) && !isDisabled(e.resolvedPath) && (!isAbsolute(e.resolvedPath) || existsSync(e.resolvedPath)))
+			.map((e) => ({
 				name: basename(e.path).replace(/\.[tj]s$/, ""),
 				path: e.path,
 				tools: [...e.tools.keys()],
 				commands: [...e.commands.keys()],
 				error: errByPath.get(e.path),
-			})).concat(
+				builtin: isBuiltin(e.path),
+			}))
+			.concat(
 				ext.errors
-					.filter((er) => !ext.extensions.some((e) => e.path === er.path))
-					.map((er) => ({ name: basename(er.path).replace(/\.[tj]s$/, ""), path: er.path, tools: [], commands: [], error: er.error })),
-			),
+					.filter((er) => !isDisabled(er.path) && !ext.extensions.some((e) => e.path === er.path))
+					.map((er) => ({
+						name: basename(er.path).replace(/\.[tj]s$/, ""),
+						path: er.path,
+						tools: [],
+						commands: [],
+						error: er.error,
+						builtin: isBuiltin(er.path),
+					})),
+			);
+		for (const path of disabledList) {
+			if (isBuiltin(path) || (isAbsolute(path) && !existsSync(path))) continue;
+			extensions.push({
+				name: basename(path).replace(/\.[tj]s$/, ""),
+				path,
+				tools: [],
+				commands: [],
+				disabled: true,
+				builtin: false,
+			});
+		}
+		return {
+			extensions,
 			skills: skillsRes.skills.filter((s) => existsSync(s.filePath)).map((s) => ({ name: s.name, description: s.description, filePath: s.filePath })),
 			skillDiagnostics: skillsRes.diagnostics.map((d) => ({ type: d.type, message: d.message, path: d.path })),
 			extensionsDir: join(this.agentDir, "extensions"),
@@ -336,7 +365,13 @@ export class Driver {
 	private loadGuiSettings(): GuiSettings {
 		try {
 			const raw = JSON.parse(readFileSync(this.guiSettingsPath(), "utf8"));
-			return { ...DEFAULT_GUI_SETTINGS, ...raw };
+			return {
+				...DEFAULT_GUI_SETTINGS,
+				...raw,
+				disabledExtensions: Array.isArray(raw.disabledExtensions)
+					? raw.disabledExtensions.filter((p: unknown): p is string => typeof p === "string")
+					: [],
+			};
 		} catch {
 			return { ...DEFAULT_GUI_SETTINGS };
 		}
@@ -1175,10 +1210,28 @@ export class Driver {
 	async deleteExtension(path: string): Promise<void> {
 		try {
 			if (existsSync(path)) rmSync(path, { force: true });
+			const disabled = this.guiSettings?.disabledExtensions ?? [];
+			if (disabled.includes(path)) {
+				this.setGuiSettings({ disabledExtensions: disabled.filter((p) => p !== path) });
+			}
 			this.providerWarmupPromise = undefined;
 		} catch {
 			/* ignore */
 		}
+	}
+
+	async setExtensionDisabled(path: string, disabled: boolean): Promise<ResourcesPayload> {
+		const target = isAbsolute(path) ? resolve(path) : path;
+		const current = (this.guiSettings?.disabledExtensions ?? []).filter((p) => (isAbsolute(p) ? resolve(p) : p) !== target);
+		if (disabled) current.push(path);
+		this.setGuiSettings({ disabledExtensions: current });
+		this.providerWarmupPromise = undefined;
+		const session = this.session;
+		if (session && !session.isStreaming && !session.isCompacting) {
+			await this.runSessionOperation(session, () => session.reload());
+			this.emitState();
+		}
+		return this.getResources();
 	}
 
 	async deleteSkill(filePath: string): Promise<void> {
@@ -1482,7 +1535,13 @@ export class Driver {
 	}
 
 	private async createSession(cwd: string, controller: AbortController, sessionManager?: SessionManager) {
-		const { settingsManager, resourceLoader } = await loadSessionResources(cwd, this.agentDir, this.oauthBridge, controller.signal);
+		const { settingsManager, resourceLoader } = await loadSessionResources(
+			cwd,
+			this.agentDir,
+			this.oauthBridge,
+			controller.signal,
+			() => this.guiSettings?.disabledExtensions ?? [],
+		);
 		const modelRuntime = await this.createModelRuntime();
 		let session: AgentSession | undefined;
 		try {

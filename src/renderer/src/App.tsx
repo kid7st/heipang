@@ -56,6 +56,7 @@ export default function App() {
 		sidebarWidth: 280,
 		rightPanelWidth: 320,
 		sidebarCollapsed: false,
+		disabledExtensions: [],
 	});
 	const [sbWidth, setSbWidth] = useState(280);
 	const [rightWidth, setRightWidth] = useState(320);
@@ -683,6 +684,10 @@ export default function App() {
 					onGuiChange={setGui}
 					models={models}
 					onModelsChange={setModels}
+					onExtensionsChange={() => {
+						void window.pi.getCommands().then(setCommands);
+						void window.pi.getGuiSettings().then(setGui);
+					}}
 					onEditGlobalMemory={() => setMemory({ label: "all conversations" })}
 				/>
 			)}

@@ -109,6 +109,7 @@ export function registerIpc(driver: Driver, getWindow: () => BrowserWindow | nul
 	h("pi:readMemory", (cwd?: string) => driver.readMemory(cwd));
 	h("pi:writeMemory", (content: string, cwd?: string) => driver.writeMemory(content, cwd));
 	h("pi:deleteExtension", (path: string) => driver.deleteExtension(path));
+	h("pi:setExtensionDisabled", (path: string, disabled: boolean) => driver.setExtensionDisabled(path, disabled));
 	h("pi:deleteSkill", (path: string) => driver.deleteSkill(path));
 
 	// resources & settings

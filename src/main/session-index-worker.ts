@@ -27,13 +27,12 @@ async function readInfo(path: string, modifiedFallback: number): Promise<Session
 	const texts: string[] = [];
 	const input = createReadStream(path, { encoding: "utf8" });
 	const lines = createInterface({ input, crlfDelay: Infinity });
-	let incompleteLine = false;
 	try {
 		for await (const line of lines) {
 			if (!line.trim()) continue;
-			if (incompleteLine) throw new Error("Invalid JSON before the final session line");
 			let entry: any;
-			try { entry = JSON.parse(line); } catch { incompleteLine = true; continue; }
+			try { entry = JSON.parse(line); } catch { continue; }
+			if (!entry || typeof entry !== "object") continue;
 			if (!header) {
 				if (entry.type !== "session") return null;
 				header = entry;

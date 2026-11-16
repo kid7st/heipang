@@ -257,13 +257,32 @@ export default function(pi) { appendFileSync(${JSON.stringify(trustMarker)}, " f
 		projectTrust.set(cwd, true);
 		await writeFile(join(cwd, "AGENTS.md"), `Project ${name} instruction sentinel`);
 		await writeFile(join(cwd, ".pi", "extensions", "probe.ts"), `export default function(pi) {
- pi.on("session_start", (_event, ctx) => pi.appendEntry("fixture-start", { cwd: ctx.cwd }));
+ pi.on("session_start", (_event, ctx) => {
+  ctx.ui.setWidget("probe", (_tui, theme) => ({ render: () => [theme.fg("dim", "ok")], invalidate() {} }), { placement: "belowEditor" });
+  ctx.ui.setStatus("probe", ctx.ui.theme.fg("accent", "ready"));
+  ctx.ui.setFooter(() => ({ render: () => [], invalidate() {} }));
+  ctx.ui.setTitle("probe");
+  const unsub = ctx.ui.onTerminalInput(() => undefined);
+  unsub();
+  pi.appendEntry("fixture-start", { cwd: ctx.cwd });
+ });
  pi.on("session_shutdown", async (_event, ctx) => {
+  ctx.ui.setWidget("probe", undefined);
   await new Promise((resolve) => setTimeout(resolve, 10));
   pi.appendEntry("fixture-stop", { cwd: ctx.cwd });
  });
  pi.registerCommand("probe", { handler: async (_args, ctx) => {
-  pi.appendEntry("fixture-ui", { hasUI: ctx.hasUI });
+  const customResult = await ctx.ui.custom(() => ({ render: () => [], invalidate() {} }));
+  const editorResult = await ctx.ui.editor("title", "prefill");
+  const themeResult = ctx.ui.setTheme("dark");
+  pi.appendEntry("fixture-ui", {
+   hasUI: ctx.hasUI,
+   customResult: customResult ?? null,
+   editorResult: editorResult ?? null,
+   editorText: ctx.ui.getEditorText(),
+   themeSuccess: themeResult.success,
+   toolsExpanded: ctx.ui.getToolsExpanded(),
+  });
   ctx.ui.notify("Project ${name} command output");
  } });
 }`);
@@ -275,7 +294,11 @@ export default function(pi) { appendFileSync(${JSON.stringify(trustMarker)}, " f
 	assert.ok(!sessionA.systemPrompt.includes("Project B instruction sentinel"));
 	assert.equal(sessionA.sessionManager.getBranch().filter((entry) => entry.customType === "fixture-start").length, 1);
 	await sessionA.prompt("/probe");
-	assert.ok(sessionA.sessionManager.getBranch().some((entry) => entry.customType === "fixture-ui" && entry.data.hasUI));
+	assert.ok(sessionA.sessionManager.getBranch().some((entry) =>
+		entry.customType === "fixture-ui" && entry.data.hasUI
+		&& entry.data.customResult === null && entry.data.editorResult === null
+		&& entry.data.editorText === "" && entry.data.themeSuccess === false && entry.data.toolsExpanded === false));
+	assert.deepEqual(notices.filter((message) => message.includes("probe.ts")), []);
 	assert.ok(notices.includes("Project A command output"));
 	const controllerA = driver.sessionControllers.get(sessionA);
 	const b = await driver.newSession(projects[1]);
@@ -293,6 +316,32 @@ export default function(pi) { appendFileSync(${JSON.stringify(trustMarker)}, " f
 	await sessionB.prompt("/probe");
 	assert.ok(notices.includes("Project B command output"));
 	assert.ok((await driver.getCommands()).some((command) => command.name === "probe"));
+	const toggleAgentDir = join(root, "toggle-agent");
+	await mkdir(join(toggleAgentDir, "extensions"), { recursive: true });
+	new ProjectTrustStore(toggleAgentDir).set(projects[0], true);
+	const toggledExt = join(toggleAgentDir, "extensions", "toggle-ext.ts");
+	const toggledSentinel = join(root, "toggle-ext-ran");
+	await writeFile(toggledExt, `import { writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(toggledSentinel)}, "loaded");
+export default function(pi) { pi.registerCommand("toggle-probe", { handler: async () => {} }); }`);
+	const toggleDriver = makeDriver();
+	toggleDriver.agentDir = toggleAgentDir;
+	toggleDriver.guiSettings = { autoExtractTasks: false, disabledExtensions: [toggledExt] };
+	await toggleDriver.newSession(projects[0]);
+	await assert.rejects(readFile(toggledSentinel), { code: "ENOENT" });
+	assert.equal((await toggleDriver.getCommands()).some((command) => command.name === "toggle-probe"), false);
+	let toggleResources = await toggleDriver.getResources();
+	assert.equal(toggleResources.extensions.find((ext) => ext.path === toggledExt)?.disabled, true);
+	toggleResources = await toggleDriver.setExtensionDisabled(toggledExt, false);
+	assert.equal(toggleResources.extensions.find((ext) => ext.path === toggledExt)?.disabled, undefined);
+	assert.equal(await readFile(toggledSentinel, "utf8"), "loaded");
+	assert.ok((await toggleDriver.getCommands()).some((command) => command.name === "toggle-probe"));
+	toggleResources = await toggleDriver.setExtensionDisabled(toggledExt, true);
+	assert.equal(toggleResources.extensions.find((ext) => ext.path === toggledExt)?.disabled, true);
+	assert.equal((await toggleDriver.getCommands()).some((command) => command.name === "toggle-probe"), false);
+	await readFile(toggledExt);
+	await assert.rejects(readFile(join(toggleAgentDir, "settings.json")), { code: "ENOENT" });
+	await toggleDriver.disposeSession();
 	await driver.disposeSession();
 	assert.equal(sessionB.sessionManager.getBranch().filter((entry) => entry.customType === "fixture-stop").length, 1);
 	const realCreate = driver.createSession.bind(driver);

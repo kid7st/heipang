@@ -35,6 +35,7 @@ const api: PiApi = {
 	readMemory: (cwd) => ipcRenderer.invoke("pi:readMemory", cwd),
 	writeMemory: (content, cwd) => ipcRenderer.invoke("pi:writeMemory", content, cwd),
 	deleteExtension: (path) => ipcRenderer.invoke("pi:deleteExtension", path),
+	setExtensionDisabled: (path, disabled) => ipcRenderer.invoke("pi:setExtensionDisabled", path, disabled),
 	deleteSkill: (path) => ipcRenderer.invoke("pi:deleteSkill", path),
 	respondRequest: (id, value) => ipcRenderer.send("pi:respond", id, value),
 	onRequest: (cb) => {

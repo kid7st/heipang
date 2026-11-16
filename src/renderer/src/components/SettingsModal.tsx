@@ -132,6 +132,7 @@ export function SettingsModal({
 	onGuiChange,
 	models,
 	onModelsChange,
+	onExtensionsChange,
 	onEditGlobalMemory,
 	initialTab = "general",
 }: {
@@ -140,6 +141,7 @@ export function SettingsModal({
 	onGuiChange: (g: GuiSettings) => void;
 	models: ModelsPayload | null;
 	onModelsChange: (m: ModelsPayload) => void;
+	onExtensionsChange?: () => void;
 	onEditGlobalMemory: () => void;
 	initialTab?: Tab;
 }) {
@@ -148,6 +150,8 @@ export function SettingsModal({
 	const [res, setRes] = useState<ResourcesPayload | null>(null);
 	const [accounts, setAccounts] = useState<AccountInfo[] | null>(null);
 	const [busyAccount, setBusyAccount] = useState<string | null>(null);
+	const [busyExtension, setBusyExtension] = useState<string | null>(null);
+	const [extError, setExtError] = useState<string | null>(null);
 	const [viewer, setViewer] = useState<{ title: string; path: string } | null>(null);
 
 	const loadAccounts = () => window.pi.getAccounts().then(setAccounts);
@@ -165,6 +169,19 @@ export function SettingsModal({
 		if (!confirm(`Delete extension "${name}"? This removes the file from ~/.pi/agent/extensions.`)) return;
 		await window.pi.deleteExtension(path);
 		setRes(await window.pi.getResources());
+		onExtensionsChange?.();
+	};
+	const toggleExtension = async (path: string, disabled: boolean) => {
+		setBusyExtension(path);
+		setExtError(null);
+		try {
+			setRes(await window.pi.setExtensionDisabled(path, disabled));
+			onExtensionsChange?.();
+		} catch (error) {
+			setExtError(error instanceof Error ? error.message : String(error));
+		} finally {
+			setBusyExtension(null);
+		}
 	};
 	const delSkill = async (filePath: string, name: string) => {
 		if (!confirm(`Delete skill "${name}"? This removes its folder from ~/.pi/agent/skills.`)) return;
@@ -302,15 +319,20 @@ export function SettingsModal({
 								Open folder
 							</button>
 						</div>
+						{extError && <div className="setting-note" style={{ color: "#b23a2e", marginBottom: 8 }}>{extError}</div>}
 						<div className="card-grid">
 							{!res && <div className="setting-note">Loading…</div>}
 							{res?.extensions.map((e) => (
-								<div className={`card res-card${e.error ? " has-error" : ""}`} key={e.path} onClick={() => setViewer({ title: e.name, path: e.path })}>
-									<button className="card-x" title="Delete" onClick={(ev) => { ev.stopPropagation(); delExtension(e.path, e.name); }} type="button">
-										×
-									</button>
+								<div className={`card res-card${e.error ? " has-error" : ""}${e.disabled ? " is-disabled" : ""}`} key={e.path} onClick={() => setViewer({ title: e.name, path: e.path })}>
+									{!e.builtin && (
+										<button className="card-x" title="Delete" onClick={(ev) => { ev.stopPropagation(); delExtension(e.path, e.name); }} type="button">
+											×
+										</button>
+									)}
 									<div className="res-name">{e.name}</div>
-									{e.error ? (
+									{e.disabled ? (
+										<div className="res-tags"><span className="res-tag dim">disabled in HEIPANG</span></div>
+									) : e.error ? (
 										<div className="res-error">error — click to view</div>
 									) : (
 										<div className="res-tags">
@@ -319,10 +341,22 @@ export function SettingsModal({
 											{e.tools.length === 0 && e.commands.length === 0 && <span className="res-tag dim">hooks</span>}
 										</div>
 									)}
+									{!e.builtin && (
+										<div className="res-actions" onClick={(ev) => ev.stopPropagation()}>
+											<button
+												className="btn btn-sm"
+												disabled={busyExtension === e.path}
+												onClick={() => toggleExtension(e.path, !e.disabled)}
+												type="button"
+											>
+												{busyExtension === e.path ? "Updating…" : e.disabled ? "Enable" : "Disable"}
+											</button>
+										</div>
+									)}
 								</div>
 							))}
 						</div>
-						<div className="setting-note">Drop a .ts file into the folder, then reopen Settings.</div>
+						<div className="setting-note">Drop a .ts file into the folder, then reopen Settings. Disabling only turns an extension off in HEIPANG without affecting pi CLI.</div>
 					</div>
 				)}
 
