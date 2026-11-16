@@ -71,12 +71,26 @@ export const net = { request(options) {
 	await assert.rejects(download("https://example.test/installer", join(root, "interrupted"), () => {}), /interrupted/);
 	response("Denied", 403);
 	await assert.rejects(download("https://example.test/installer", join(root, "denied"), () => {}), /HTTP 403/);
-	for (const channel of ["stable", "meta"]) {
+	const release = (tag, overrides = {}) => ({
+		tag_name: tag, body: `notes ${tag}`, draft: false, prerelease: false,
+		assets: [{ name: "HEIPANG-arm64.dmg", browser_download_url: `https://example.test/${tag}/mac` }, { name: "HEIPANG-Setup.exe", browser_download_url: `https://example.test/${tag}/win` }],
+		...overrides,
+	});
+	const releases = [release("meta-v0.9.0", { draft: true }), release("meta-v0.4.13"), release("v0.5.0"), release("meta-v0.4.11")];
+	for (const [channel, tag] of [["stable", "v0.5.0"], ["meta", "meta-v0.4.13"]]) {
 		await writeFile(join(root, "package.json"), JSON.stringify({ updateChannel: channel }));
-		response(JSON.stringify({ version: "0.4.12", mac: "https://example.test/mac", win: "https://example.test/win" }));
-		assert.equal((await checkForUpdate()).hasUpdate, true);
-		assert.ok(transport.urls.at(-1).includes(channel === "meta" ? "/meta-latest.json" : "/heipang-latest.json"));
+		response(JSON.stringify(releases));
+		const check = await checkForUpdate();
+		assert.equal(check.hasUpdate, true);
+		assert.equal(check.latest, tag.replace(/^(meta-)?v/, ""));
+		assert.equal(check.notes, `notes ${tag}`);
+		assert.equal(check.url, `https://example.test/${tag}/${process.platform === "darwin" ? "mac" : "win"}`);
+		assert.ok(transport.urls.at(-1).startsWith("https://api.github.com/repos/kid7st/heipang/releases"));
 	}
+	response(JSON.stringify([release("meta-v0.4.11")]));
+	assert.equal((await checkForUpdate()).hasUpdate, false);
+	response(JSON.stringify([release("v0.5.0")]));
+	assert.match((await checkForUpdate()).error, /No published release/);
 	const dismissed = [];
 	const shown = [];
 	const requests = new InputRequests((request) => shown.push(request), (id) => dismissed.push(id));

@@ -7,13 +7,21 @@ import { join } from "node:path";
 import type { UpdateCheck } from "../shared/types.js";
 import { MAC_INSTALL_SCRIPT, prepareMacUpdate } from "./mac-update.js";
 
-const RELEASE_FEED_BASE = "https://raw.githubusercontent.com/kuaai/heipang-releases/main";
+const RELEASES_API = "https://api.github.com/repos/kid7st/heipang/releases?per_page=30";
 
-function latestUrl(): string {
+function tagPrefix(): string {
 	const metadata = JSON.parse(readFileSync(join(app.getAppPath(), "package.json"), "utf8"));
-	if (metadata.updateChannel === "meta") return `${RELEASE_FEED_BASE}/meta-latest.json`;
-	if (metadata.updateChannel === "stable") return `${RELEASE_FEED_BASE}/heipang-latest.json`;
+	if (metadata.updateChannel === "meta") return "meta-v";
+	if (metadata.updateChannel === "stable") return "v";
 	throw new Error("The application has no valid update channel");
+}
+
+interface GithubRelease {
+	tag_name: string;
+	body?: string | null;
+	draft: boolean;
+	prerelease: boolean;
+	assets: { name: string; browser_download_url: string }[];
 }
 
 interface RemoteLatest {
@@ -21,6 +29,18 @@ interface RemoteLatest {
 	notes?: string;
 	mac?: string;
 	win?: string;
+}
+
+function latestFromReleases(releases: GithubRelease[], prefix: string): RemoteLatest {
+	const release = releases.find((r) => !r.draft && !r.prerelease && r.tag_name.startsWith(prefix));
+	if (!release) throw new Error("No published release was found for this update channel");
+	const asset = (extension: string) => release.assets.find((a) => a.name.endsWith(extension))?.browser_download_url;
+	return {
+		version: release.tag_name.slice(prefix.length),
+		notes: release.body ?? undefined,
+		mac: asset(".dmg"),
+		win: asset(".exe"),
+	};
 }
 
 function cmpVer(a: string, b: string): number {
@@ -56,7 +76,7 @@ function fetchText(url: string): Promise<string> {
 export async function checkForUpdate(): Promise<UpdateCheck> {
 	const current = app.getVersion();
 	try {
-		const data = JSON.parse(await fetchText(`${latestUrl()}?t=${Date.now()}`)) as RemoteLatest;
+		const data = latestFromReleases(JSON.parse(await fetchText(RELEASES_API)) as GithubRelease[], tagPrefix());
 		const latest = String(data.version || "");
 		const url = process.platform === "darwin" ? data.mac : data.win;
 		const hasUpdate = !!latest && cmpVer(latest, current) > 0 && !!url;
