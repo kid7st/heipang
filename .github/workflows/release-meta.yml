@@ -2,7 +2,8 @@ name: HEIPANG Meta Release
 
 # Builds the HEIPANG Meta installers (Windows NSIS + macOS arm64 dmg). A push of
 # a `meta-v*` tag also publishes them as a GitHub Release; the in-app updater
-# reads the latest published release. workflow_dispatch only builds artifacts.
+# reads the latest published release, with release-notes/<version>.md as its
+# notes. workflow_dispatch only builds artifacts.
 on:
   workflow_dispatch: {}
   push:
@@ -10,7 +11,20 @@ on:
       - "meta-v*"
 
 jobs:
+  validate:
+    if: startsWith(github.ref, 'refs/tags/meta-v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check tag, version and release notes
+        run: |
+          version=$(node -p "require('./package.json').version")
+          test "${GITHUB_REF_NAME}" = "meta-v${version}" || { echo "Tag ${GITHUB_REF_NAME} does not match package.json version ${version}"; exit 1; }
+          test -s "release-notes/${version}.md" || { echo "Missing release-notes/${version}.md"; exit 1; }
+
   windows:
+    needs: validate
+    if: ${{ !cancelled() && (needs.validate.result == 'success' || needs.validate.result == 'skipped') }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -32,6 +46,8 @@ jobs:
           if-no-files-found: error
 
   mac:
+    needs: validate
+    if: ${{ !cancelled() && (needs.validate.result == 'success' || needs.validate.result == 'skipped') }}
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
@@ -59,10 +75,6 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
-      - name: Check tag matches package.json version
-        run: |
-          version=$(node -p "require('./package.json').version")
-          test "${GITHUB_REF_NAME}" = "meta-v${version}" || { echo "Tag ${GITHUB_REF_NAME} does not match package.json version ${version}"; exit 1; }
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -73,4 +85,4 @@ jobs:
         run: |
           version="${GITHUB_REF_NAME#meta-v}"
           gh release create "${GITHUB_REF_NAME}" dist/*.dmg dist/*.exe \
-            --title "HEIPANG Meta ${version}" --generate-notes --verify-tag
+            --title "HEIPANG Meta ${version}" --notes-file "release-notes/${version}.md" --verify-tag
