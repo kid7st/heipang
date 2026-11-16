@@ -60,7 +60,7 @@ export class ModelCatalog {
 	private discovered = new Map<string, RemoteModel>();
 	private static readonly CATALOG_TTL = 7 * 24 * 60 * 60 * 1000;
 	private static readonly CATALOG_URL =
-		"https://raw.githubusercontent.com/kuaai/heipang-releases/main/models-catalog.json";
+		"https://raw.githubusercontent.com/kid7st/heipang/main/models-catalog.json";
 
 	constructor(private agentDir: string, private runtime: () => Promise<ModelRuntime>, private settings: SettingsManager, private signal?: AbortSignal) {}
 

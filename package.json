@@ -1,6 +1,6 @@
 {
   "name": "heipang",
-  "version": "0.4.12",
+  "version": "0.4.13",
   "updateChannel": "stable",
   "description": "HEIPANG — fast, model-agnostic desktop GUI for pi",
   "main": "./out/main/index.js",

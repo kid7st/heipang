@@ -1,10 +1,8 @@
-name: Build HEIPANG Meta
+name: HEIPANG Meta Release
 
-# Builds the HEIPANG Meta installers (Windows NSIS + macOS arm64 dmg) and
-# uploads them as workflow artifacts. Publishing to the public heipang-releases
-# repo is done separately (maintainer runs `gh release upload meta-latest ...`),
-# so no cross-repo token is needed here. Runs on GitHub's network to avoid local
-# flaky downloads.
+# Builds the HEIPANG Meta installers (Windows NSIS + macOS arm64 dmg). A push of
+# a `meta-v*` tag also publishes them as a GitHub Release; the in-app updater
+# reads the latest published release. workflow_dispatch only builds artifacts.
 on:
   workflow_dispatch: {}
   push:
@@ -52,3 +50,27 @@ jobs:
           name: HEIPANG-Meta-arm64-dmg
           path: release-meta/*.dmg
           if-no-files-found: error
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/meta-v')
+    needs: [windows, mac]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check tag matches package.json version
+        run: |
+          version=$(node -p "require('./package.json').version")
+          test "${GITHUB_REF_NAME}" = "meta-v${version}" || { echo "Tag ${GITHUB_REF_NAME} does not match package.json version ${version}"; exit 1; }
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#meta-v}"
+          gh release create "${GITHUB_REF_NAME}" dist/*.dmg dist/*.exe \
+            --title "HEIPANG Meta ${version}" --generate-notes --verify-tag

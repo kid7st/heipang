@@ -1,0 +1,87 @@
+{
+  "version": 1,
+  "updated": "2026-09-12",
+  "note": "Offline fallback catalog. Anthropic comes live from /v1/models and Codex from the live model list, where max_context_window is the real ceiling (context_window is only the CLI's default truncation point). A window that is too small makes auto-compaction fire far too early; one that is too large lets the provider hard-fail.",
+  "models": [
+    {
+      "provider": "openai-codex",
+      "id": "gpt-6-astra",
+      "name": "GPT-6 Astra",
+      "reasoning": true,
+      "contextWindow": 872000,
+      "maxTokens": 128000
+    },
+    {
+      "provider": "openai-codex",
+      "id": "gpt-5.6-sol",
+      "name": "GPT-5.6 Sol",
+      "reasoning": true,
+      "contextWindow": 872000,
+      "maxTokens": 128000
+    },
+    {
+      "provider": "openai-codex",
+      "id": "gpt-5.6-terra",
+      "name": "GPT-5.6 Terra",
+      "reasoning": true,
+      "contextWindow": 872000,
+      "maxTokens": 128000
+    },
+    {
+      "provider": "openai-codex",
+      "id": "gpt-5.6-luna",
+      "name": "GPT-5.6 Luna",
+      "reasoning": true,
+      "contextWindow": 872000,
+      "maxTokens": 128000
+    },
+    {
+      "provider": "openai-codex",
+      "id": "gpt-5.5",
+      "name": "GPT-5.5",
+      "reasoning": true,
+      "contextWindow": 272000,
+      "maxTokens": 128000
+    },
+    {
+      "provider": "anthropic",
+      "id": "claude-fable-5-1",
+      "name": "Claude Fable 5.1",
+      "reasoning": true,
+      "contextWindow": 1000000,
+      "maxTokens": 128000
+    },
+    {
+      "provider": "anthropic",
+      "id": "claude-fable-5",
+      "name": "Claude Fable 5",
+      "reasoning": true,
+      "contextWindow": 1000000,
+      "maxTokens": 128000
+    },
+    {
+      "provider": "anthropic",
+      "id": "claude-opus-5",
+      "name": "Claude Opus 5",
+      "reasoning": true,
+      "contextWindow": 1000000,
+      "maxTokens": 128000
+    },
+    {
+      "provider": "anthropic",
+      "id": "claude-sonnet-5",
+      "name": "Claude Sonnet 5",
+      "reasoning": true,
+      "contextWindow": 1000000,
+      "maxTokens": 128000
+    },
+    {
+      "provider": "anthropic",
+      "id": "claude-opus-4-8",
+      "name": "Claude Opus 4.8",
+      "reasoning": true,
+      "contextWindow": 1000000,
+      "maxTokens": 128000
+    }
+  ]
+}
