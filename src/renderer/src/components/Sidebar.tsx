@@ -179,16 +179,16 @@ export function Sidebar({
 			if (s.modified > f.latest) f.latest = s.modified;
 		}
 		const arr = [...map.values()];
-		for (const f of arr) f.sessions.sort((a, b) => b.modified - a.modified);
-		const orderIndex = new Map(folderOrder.map((c, i) => [c, i] as const));
-		arr.sort((a, b) => {
-			const ai = orderIndex.has(a.cwd) ? (orderIndex.get(a.cwd) as number) : Number.MAX_SAFE_INTEGER;
-			const bi = orderIndex.has(b.cwd) ? (orderIndex.get(b.cwd) as number) : Number.MAX_SAFE_INTEGER;
-			if (ai !== bi) return ai - bi;
-			return b.latest - a.latest;
-		});
+		for (const f of arr) {
+			f.sessions.sort((a, b) => {
+				const titleA = a.name || a.firstMessage || "";
+				const titleB = b.name || b.firstMessage || "";
+				return titleA.localeCompare(titleB, "zh-CN", { numeric: true, sensitivity: "base" });
+			});
+		}
+		arr.sort((a, b) => a.name.localeCompare(b.name, "zh-CN", { numeric: true, sensitivity: "base" }));
 		return arr;
-	}, [sessions, q, folderOrder, workspaceNames]);
+	}, [sessions, q, workspaceNames]);
 
 	const reorder = (target: string) => {
 		if (!dragCwd || dragCwd === target) return;
