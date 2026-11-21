@@ -49,7 +49,11 @@ The URL must be an HTTPS origin without credentials, paths, query parameters or 
 
 External copies of the `pi-antigravity` package are excluded from HEIPANG's active extensions to avoid duplicate providers, commands and tools. They remain installed for CLI use. Existing `auth.json` OAuth credentials are left untouched; HEIPANG overrides them only in memory while its relay connection is configured.
 
-The bundled source in `src/main/antigravity/` comes from pi-antigravity 0.11.0 (MIT; see its `LICENSE`), with application-specific configuration, provider availability, project-cache isolation and redirect protection. It includes upstream's system-prompt fix from `72e4786`: the exact phrase `codemode scripts and non-LLM models such as classifiers and image models` is shortened to `codemode scripts` in system instructions and injected skill instructions. Ordinary user messages are not rewritten. It also includes upstream's tool-result image fix from `a889327`: Gemini function responses remain in the model turn, while images follow in a user turn after all consecutive tool results. Claude and GPT-OSS tool-result formatting is unchanged.
+HEIPANG bundles the `pi-antigravity/app` dependency from the Git commit pinned in `package.json`. The dependency owns the relay protocol, model routing, and tools. HEIPANG owns app settings, credential storage, and session setup. Keep the dependency's `agy` version aligned with the relay's pinned version.
+
+Installing from source requires read access to the private `kid7st/pi-antigravity` repository. For Meta release builds, set the `ANTIGRAVITY_SOURCE_TOKEN` Actions secret to a fine-grained token with read-only Contents access to that repository. The token is used only during dependency installation, not shipped with the app.
+
+For local prompt comparisons, place an exact UTF-8 prompt snapshot in `~/.pi/agent/heipang-antigravity-system-prompt.txt`. HEIPANG uses it verbatim for the main Antigravity conversation, including tool-call continuations. It does not affect Pi CLI, other models, or auxiliary requests. This replaces workspace and tool guidance in the prompt, not the actual workspace or tool declarations; invoked skills remain in the user turn. Delete the file to restore the dynamically generated prompt. The file is read on each request, so restarting is not required.
 
 ## DeepSeek built-in models
 

@@ -28,11 +28,16 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: 22
       - name: Install dependencies
-        run: npm install --no-audit --no-fund
+        shell: bash
+        env:
+          ANTIGRAVITY_SOURCE_TOKEN: ${{ secrets.ANTIGRAVITY_SOURCE_TOKEN }}
+        run: bash scripts/install-release-dependencies.sh
       - name: Build + package HEIPANG Meta (NSIS x64)
         run: npm run pack:meta:win -- --publish never
       - name: List artifacts
@@ -51,11 +56,16 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: 22
       - name: Install dependencies
-        run: npm install --no-audit --no-fund
+        shell: bash
+        env:
+          ANTIGRAVITY_SOURCE_TOKEN: ${{ secrets.ANTIGRAVITY_SOURCE_TOKEN }}
+        run: bash scripts/install-release-dependencies.sh
       - name: Build + package HEIPANG Meta (dmg arm64)
         run: npm run pack:meta:mac -- --publish never
       - name: List artifacts

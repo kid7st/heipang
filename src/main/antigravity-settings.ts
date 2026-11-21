@@ -1,10 +1,7 @@
 import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { safeStorage } from "electron";
-import { fetch } from "undici";
-import { antigravityHeaders, extractProjectId, LOAD_CODE_ASSIST_BODY } from "./antigravity/client/client.js";
-import { configureRelay } from "./antigravity/client/relay.js";
-import { assertSafeRelayUrl } from "./antigravity/utils/security.js";
+import { assertSafeRelayUrl, configureRelay, verifyRelayConnection } from "pi-antigravity/app";
 import type { AntigravitySettings, AntigravitySettingsInput } from "../shared/types.js";
 
 export class AntigravitySettingsStore {
@@ -26,7 +23,7 @@ export class AntigravitySettingsStore {
 				this.loadError = "Could not read or decrypt the saved relay settings. The original file has been kept. Enter the relay URL and key to reconnect.";
 			}
 		}
-		configureRelay(this.saved ?? { url: "", key: "" });
+		configureRelay(this.saved ?? null);
 	}
 
 	get(): AntigravitySettings {
@@ -44,15 +41,7 @@ export class AntigravitySettingsStore {
 		if (!safeStorage.isEncryptionAvailable() || (process.platform === "linux" && safeStorage.getSelectedStorageBackend() === "basic_text")) {
 			throw new Error("Secure credential storage is unavailable on this system.");
 		}
-		const response = await fetch(`${url}/v1internal:loadCodeAssist`, {
-			method: "POST",
-			headers: antigravityHeaders(key),
-			body: LOAD_CODE_ASSIST_BODY,
-			redirect: "error",
-			signal: AbortSignal.timeout(30_000),
-		});
-		if (!response.ok) throw new Error(`Antigravity relay verification failed (HTTP ${response.status}). Check the relay URL, key and relay account.`);
-		if (!extractProjectId(await response.json())) throw new Error("The relay account returned no Antigravity project.");
+		await verifyRelayConnection(url, key);
 		const encryptedKey = safeStorage.encryptString(key).toString("base64");
 		const temporary = `${this.path}.tmp`;
 		try {
@@ -70,6 +59,6 @@ export class AntigravitySettingsStore {
 		rmSync(this.path, { force: true });
 		this.loadError = undefined;
 		this.saved = undefined;
-		configureRelay({ url: "", key: "" });
+		configureRelay(null);
 	}
 }

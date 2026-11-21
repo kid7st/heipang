@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, w
 import { join } from "node:path";
 import type { Model } from "@earendil-works/pi-ai";
 import type { ModelRuntime, SettingsManager } from "@earendil-works/pi-coding-agent";
-import { applyAntigravityCatalog, discoverAntigravityModels, getCurrentAntigravityCatalog } from "./antigravity/index.js";
+import { applyAntigravityCatalog, discoverAntigravityModels, getCurrentAntigravityCatalog } from "pi-antigravity/app";
 import type { NewModelInput, RemoteModel } from "../shared/types.js";
 
 type AnyModel = Model<any>;
