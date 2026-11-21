@@ -149,7 +149,8 @@ export function SettingsModal({
 	const [pi, setPi] = useState<PiSettings | null>(null);
 	const [res, setRes] = useState<ResourcesPayload | null>(null);
 	const [accounts, setAccounts] = useState<AccountInfo[] | null>(null);
-	const [busyAccount, setBusyAccount] = useState<string | null>(null);
+	const [busyAccount, setBusyAccount] = useState<{ id: string; label: string } | null>(null);
+	const [accountError, setAccountError] = useState<{ id: string; message: string } | null>(null);
 	const [busyExtension, setBusyExtension] = useState<string | null>(null);
 	const [extError, setExtError] = useState<string | null>(null);
 	const [viewer, setViewer] = useState<{ title: string; path: string } | null>(null);
@@ -188,19 +189,23 @@ export function SettingsModal({
 		await window.pi.deleteSkill(filePath);
 		setRes(await window.pi.getResources());
 	};
-	const connect = async (id: string) => {
-		setBusyAccount(id);
-		const r = await window.pi.loginAccount(id);
-		setBusyAccount(null);
-		if (!r.ok && r.error) alert(`Sign-in failed: ${r.error}`);
-		loadAccounts();
-		onModelsChange(await window.pi.listModels());
-	};
-	const disconnect = async (id: string) => {
-		if (!confirm(`Sign out of ${id}?`)) return;
-		await window.pi.logoutAccount(id);
-		loadAccounts();
-		onModelsChange(await window.pi.listModels());
+	const changeAccount = async ({ id, name, connected, authType }: AccountInfo) => {
+		if (connected && !confirm(`Sign out of ${name}?`)) return;
+		setBusyAccount({ id, label: connected ? "Signing out…" : authType === "api_key" ? "Connecting…" : "Waiting for browser…" });
+		setAccountError(null);
+		try {
+			if (connected) await window.pi.logoutAccount(id);
+			else {
+				const result = await window.pi.loginAccount(id);
+				if (!result.ok) throw new Error(result.error ?? "Sign-in failed");
+			}
+			await loadAccounts();
+			onModelsChange(await window.pi.listModels());
+		} catch (error) {
+			setAccountError({ id, message: error instanceof Error ? error.message : String(error) });
+		} finally {
+			setBusyAccount(null);
+		}
 	};
 
 	return (
@@ -295,16 +300,11 @@ export function SettingsModal({
 										{a.connected ? "connected" : "not signed in"}
 									</span>
 								</div>
-								<div className="account-id">{a.id}</div>
-								{a.connected ? (
-									<button className="btn" onClick={() => disconnect(a.id)} type="button">
-										Sign out
-									</button>
-								) : (
-									<button className="btn btn-send" onClick={() => connect(a.id)} disabled={busyAccount === a.id} type="button">
-										{busyAccount === a.id ? (a.authType === "api_key" ? "Waiting for API key…" : "Waiting for browser…") : (a.authType === "api_key" ? "Add API key" : "Sign in")}
-									</button>
-								)}
+								<div className="account-id">{a.id === "google" ? "Google AI Studio API key" : a.id}</div>
+								<button className={`btn${a.connected ? "" : " btn-send"}`} onClick={() => changeAccount(a)} disabled={busyAccount !== null} type="button">
+									{busyAccount?.id === a.id ? busyAccount.label : a.connected ? "Sign out" : a.authType === "api_key" ? "Add API key" : "Sign in"}
+								</button>
+								{accountError?.id === a.id && <div className="account-error" role="alert">{accountError.message}</div>}
 							</div>
 						))}
 						<div className="setting-note">Claude / ChatGPT use browser sign-in. Antigravity uses a relay URL and key. DeepSeek uses its own API key and prepaid API balance.</div>

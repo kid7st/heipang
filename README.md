@@ -55,6 +55,12 @@ Installing from source requires read access to the private `kid7st/pi-antigravit
 
 For local prompt comparisons, place an exact UTF-8 prompt snapshot in `~/.pi/agent/heipang-antigravity-system-prompt.txt`. HEIPANG uses it verbatim for the main Antigravity conversation, including tool-call continuations. It does not affect Pi CLI, other models, or auxiliary requests. This replaces workspace and tool guidance in the prompt, not the actual workspace or tool declarations; invoked skills remain in the user turn. Delete the file to restore the dynamically generated prompt. The file is read on each request, so restarting is not required.
 
+## Gemini API key
+
+In **Settings → Accounts → Gemini API**, choose **Add API key** and enter a key from [Google AI Studio](https://aistudio.google.com/apikey). The app verifies it directly with Google before saving it to Pi’s shared `auth.json`. This connection is separate from Antigravity.
+
+If you use an enabled-model list, go to **Settings → Models → Browse Gemini**, select the models you want, and choose **Add selected**.
+
 ## DeepSeek built-in models
 
 DeepSeek V4.1 Flash (`deepseek-flash`) and DeepSeek V4 Pro (`deepseek-v4-pro`) are preconfigured and always appear in the conversation model selector. No model ID entry or manual model setup is required. Selecting one without credentials prompts for a DeepSeek API key; an account with access to Flash but not Pro can still connect.
@@ -84,6 +90,7 @@ Update channels come from packaged `updateChannel` metadata: `stable` for HEIPAN
 ```bash
 npm run test:performance   # 流式解码、PDF 转换、会话索引、IPC 补丁等
 npm run test:deepseek      # DeepSeek 接入
+npm run test:gemini        # Gemini API key sign-in and sign-out
 npm run test:antigravity   # Antigravity relay settings, credentials, models and routing
 node scripts/session-regression.mjs # Session ownership, input cancellation, model catalog and update rollback
 ```

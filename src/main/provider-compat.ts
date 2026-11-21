@@ -21,23 +21,20 @@ function looksTextual(chunk: Uint8Array | undefined): boolean {
 	}
 }
 
-/**
- * Some local HTTPS proxies gzip streamed provider responses and strip
- * `content-encoding`, so nothing downstream inflates them and pi's SSE parser
- * fails with "stream ended without a stop reason". Sniff the first chunk and
- * inflate when the body really is gzip.
- */
-export function installStreamDecompressionFix(): void {
-	const original = globalThis.fetch;
-	if (!original || (globalThis as any).__heipangGzipFix) return;
-	(globalThis as any).__heipangGzipFix = true;
+let providerFetchInstalled = false;
 
-	globalThis.fetch = (async (input: any, init?: any) => {
-		const url = String(typeof input === "string" || input instanceof URL ? input : input?.url ?? "");
+export function installProviderFetch(geminiFetch: typeof fetch): void {
+	if (providerFetchInstalled) return;
+	providerFetchInstalled = true;
+	const original = globalThis.fetch;
+
+	globalThis.fetch = async (input, init) => {
+		const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+		if (url.startsWith("https://generativelanguage.googleapis.com/")) return geminiFetch(input, init);
 		const providerResponse = /^https:\/\/(api\.anthropic\.com\/v1\/|chatgpt\.com\/backend-api\/|api\.deepseek\.com\/|.*cloudcode-pa.*\.googleapis\.com\/)/.test(url);
-		const response = await original(input as any, init as any);
-		// Never reinterpret webpage images, downloads, or arbitrary extension fetches
-		// as Brotli. Normal provider responses are already decoded by fetch.
+		const response = await original(input, init);
+		// Some proxies strip Content-Encoding from compressed model streams.
+		// Do not try to decompress unrelated extension requests.
 		if (!providerResponse) return response;
 		try {
 			if (!response.body || response.headers.get("content-encoding")) return response;
@@ -89,7 +86,7 @@ export function installStreamDecompressionFix(): void {
 		} catch {
 			return response;
 		}
-	}) as typeof fetch;
+	};
 }
 
 // ---------------------------------------------------------------- PDF support

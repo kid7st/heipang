@@ -1106,6 +1106,7 @@ select {
 	display: flex;
 	gap: 8px;
 }
+.account-error,
 .antigravity-error {
 	color: var(--danger);
 	overflow-wrap: anywhere;

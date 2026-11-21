@@ -70,6 +70,26 @@ const DEFAULT_CLAUDE_CODE_VERSION = "2.1.280";
 const CLAUDE_CODE_VERSION_REQUIRED = /version (\d+\.\d+\.\d+) or newer is required/i;
 
 type AnyModel = Model<any>;
+const API_KEY_ACCOUNTS = new Set(["deepseek", "google"]);
+
+async function verifyGeminiKey(key: string, signal: AbortSignal): Promise<void> {
+	const timeout = AbortSignal.timeout(15_000);
+	let response: Response;
+	try {
+		response = await fetch("https://generativelanguage.googleapis.com/v1beta/models?pageSize=1", {
+			headers: { "x-goog-api-key": key },
+			redirect: "error",
+			signal: AbortSignal.any([signal, timeout]),
+		});
+		await response.body?.cancel();
+	} catch {
+		signal.throwIfAborted();
+		throw new Error(timeout.aborted
+			? "Gemini API key verification timed out. Check your network or system proxy and try again."
+			: "Could not reach Google Gemini. Check your network or system proxy and try again.");
+	}
+	if (!response.ok) throw new Error(`Gemini API key verification failed (HTTP ${response.status})`);
+}
 
 // Anthropic's API accepts at most 100 images per request. Above 20 images it
 // additionally requires every image to fit inside 2000×2000. A separate HTTP
@@ -1198,10 +1218,13 @@ export class Driver {
 		const runtime = this.session?.modelRuntime ?? await this.runtime();
 		return runtime
 			.getProviders()
-			.filter((p) => (p.auth?.oauth && p.id !== "github-copilot") || p.id === "deepseek" || p.id === "antigravity")
-			.map((p) => ({ id: p.id, name: p.name ?? p.id,
+			.filter((p) => (p.auth?.oauth && p.id !== "github-copilot") || API_KEY_ACCOUNTS.has(p.id) || p.id === "antigravity")
+			.map((p): AccountInfo => ({
+				id: p.id,
+				name: p.id === "google" ? "Gemini API" : p.name ?? p.id,
 				connected: p.id === "antigravity" ? hasRelayConfiguration() : runtime.hasConfiguredAuth(p.id),
-				authType: p.id === "antigravity" ? "relay" as const : p.id === "deepseek" ? "api_key" as const : "oauth" as const }));
+				authType: p.id === "antigravity" ? "relay" : API_KEY_ACCOUNTS.has(p.id) ? "api_key" : "oauth",
+			}));
 	}
 
 	async deleteExtension(path: string): Promise<void> {
@@ -1284,7 +1307,7 @@ export class Driver {
 		try {
 			const session = this.session;
 			const runtime = session?.modelRuntime ?? await this.runtime();
-			const authType = id === "deepseek" ? "api_key" : "oauth";
+			const authType = API_KEY_ACCOUNTS.has(id) ? "api_key" : "oauth";
 			const sessionSignal = session && this.sessionControllers.get(session)?.signal;
 			const loginSignal = AbortSignal.any([controller.signal, this.shutdownController.signal, ...(sessionSignal ? [sessionSignal] : [])]);
 			await runtime.login(id, authType, {
@@ -1325,6 +1348,7 @@ export class Driver {
 					}, { signal });
 					if (input == null || !input.trim()) throw new Error("Sign-in cancelled");
 					const value = input.trim();
+					if (id === "google" && prompt.type === "secret") await verifyGeminiKey(value, signal);
 					if (id === "deepseek" && prompt.type === "secret") {
 						// Verify before ModelRuntime persists the credential. Never echo a
 						// rejected key or raw server response into errors or logs.

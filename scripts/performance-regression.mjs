@@ -11,8 +11,8 @@ const fixtures = new Map();
 const originalFetch = globalThis.fetch;
 globalThis.fetch = async (input) => fixtures.get(String(input));
 const jiti = createJiti(import.meta.url);
-const { installStreamDecompressionFix, convertPdfAttachments } = await jiti.import(resolve("src/main/provider-compat.ts"));
-installStreamDecompressionFix();
+const { installProviderFetch, convertPdfAttachments } = await jiti.import(resolve("src/main/provider-compat.ts"));
+installProviderFetch(async () => assert.fail("Unexpected Gemini request"));
 for (const [name, encode] of [["gzip", gzipSync], ["brotli", brotliCompressSync], ["plain", Buffer.from]]) {
 	const url = `https://api.anthropic.com/v1/test-${name}`;
 	fixtures.set(url, new Response(encode('{"ok":true}')));
