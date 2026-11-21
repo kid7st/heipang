@@ -2,7 +2,8 @@ import { useEffect, useState } from "react";
 import { isPresetModel } from "../../../shared/model-selection";
 import type { ModelsPayload, NewModelInput, RemoteModel } from "../../../shared/types";
 
-/** Embeddable model management (rendered inside Settings → Models). */
+type RemoteProvider = "anthropic" | "openai-codex" | "antigravity";
+
 export function ModelManager({
 	models,
 	onChanged,
@@ -11,7 +12,7 @@ export function ModelManager({
 	onChanged: (next: ModelsPayload) => void;
 }) {
 	const [remote, setRemote] = useState<RemoteModel[] | null>(null);
-	const [remoteProvider, setRemoteProvider] = useState<"anthropic" | "openai-codex" | "antigravity">("anthropic");
+	const [catalogProvider, setCatalogProvider] = useState<RemoteProvider | "google">("anthropic");
 	const [remoteSel, setRemoteSel] = useState<Set<string>>(new Set());
 	const [busy, setBusy] = useState(false);
 	const [err, setErr] = useState<string | null>(null);
@@ -26,14 +27,29 @@ export function ModelManager({
 
 	const active = models.all.filter((m) => isPresetModel(m) || enabledSet.has(`${m.provider}/${m.id}`));
 
-	const fetchRemote = async (provider: "anthropic" | "openai-codex" | "antigravity") => {
+	const catalogChoices = catalogProvider === "google"
+		? models.available.filter((model) => model.provider === "google").map((model): RemoteModel => ({
+			id: model.id,
+			display_name: model.name,
+			contextWindow: model.contextWindow,
+			alreadyAdded: enabledSet.has(`google/${model.id}`),
+		}))
+		: remote;
+
+	const browseGemini = () => {
+		setErr(null);
+		setCatalogProvider("google");
+		setRemoteSel(new Set());
+	};
+
+	const fetchRemote = async (provider: RemoteProvider) => {
 		setBusy(true);
 		setErr(null);
 		try {
 			const res = provider === "openai-codex" ? await window.pi.fetchRemoteOpenAIModels()
 				: provider === "antigravity" ? await window.pi.fetchRemoteAntigravityModels() : await window.pi.fetchRemoteModels();
 			if (!res.ok) throw new Error(res.error || "Failed to fetch models");
-			setRemoteProvider(provider);
+			setCatalogProvider(provider);
 			setRemote(res.models || []);
 			setRemoteSel(new Set());
 		} catch (error) {
@@ -51,12 +67,13 @@ export function ModelManager({
 	}, []);
 
 	const refreshLatest = async () => {
+		if (catalogProvider === "google") return;
 		setBusy(true);
 		setErr(null);
 		try {
 			const result = await window.pi.refreshModelCatalog();
 			if (!result.ok) throw new Error(result.error || "Failed to refresh model catalog");
-			await fetchRemote(remoteProvider);
+			await fetchRemote(catalogProvider);
 		} catch (error) {
 			setErr(error instanceof Error ? error.message : String(error));
 		} finally {
@@ -73,14 +90,15 @@ export function ModelManager({
 	};
 
 	const addSelectedRemote = async () => {
-		if (!remote) return;
-		const picks = remote.filter((m) => remoteSel.has(m.id));
+		const picks = catalogChoices?.filter((model) => remoteSel.has(model.id)) ?? [];
 		if (picks.length === 0) return;
 		setBusy(true);
 		setErr(null);
 		try {
-			await addAndEnable(picks.map((model) => ({ provider: model.provider || remoteProvider, id: model.id })));
-			setRemote((current) => current?.map((model) => remoteSel.has(model.id) ? { ...model, alreadyAdded: true } : model) ?? null);
+			await addAndEnable(picks.map((model) => ({ provider: model.provider || catalogProvider, id: model.id })));
+			if (catalogProvider !== "google") {
+				setRemote((current) => current?.map((model) => remoteSel.has(model.id) ? { ...model, alreadyAdded: true } : model) ?? null);
+			}
 			setRemoteSel(new Set());
 		} catch (error) {
 			setErr(error instanceof Error ? error.message : String(error));
@@ -155,7 +173,10 @@ export function ModelManager({
 				<button className="btn btn-sm" onClick={() => fetchRemote("antigravity")} disabled={busy} type="button">
 					{busy ? "…" : "Fetch from Antigravity"}
 				</button>
-				<button className="btn btn-sm" onClick={refreshLatest} disabled={busy} title="Re-pull the latest-models catalog now" type="button">
+				<button className="btn btn-sm" onClick={browseGemini} disabled={busy} type="button">
+					Browse Gemini
+				</button>
+				<button className="btn btn-sm" onClick={refreshLatest} disabled={busy || catalogProvider === "google"} title="Re-pull the latest-models catalog now" type="button">
 					{busy ? "…" : "Refresh latest"}
 				</button>
 				<button className="btn btn-sm" onClick={() => setShowAdd((s) => !s)} type="button">
@@ -183,10 +204,13 @@ export function ModelManager({
 				</div>
 			)}
 
-			{remote && (
+			{catalogProvider === "google" && catalogChoices?.length === 0 && (
+				<div className="setting-note">Add a Gemini API key in Accounts to browse Gemini models.</div>
+			)}
+			{catalogChoices && catalogChoices.length > 0 && (
 				<>
 					<div className="model-table scroll">
-						{remote.map((m) => (
+						{catalogChoices.map((m) => (
 							<label className="model-row remote" key={m.id}>
 								<input
 									type="checkbox"

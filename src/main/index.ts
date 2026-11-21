@@ -1,13 +1,15 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { app, BrowserWindow, dialog, nativeImage, shell } from "electron";
+import { app, BrowserWindow, dialog, nativeImage, net, shell } from "electron";
 import { Driver } from "./driver.js";
 import { registerIpc } from "./ipc.js";
-import { installStreamDecompressionFix } from "./provider-compat.js";
+import { installProviderFetch } from "./provider-compat.js";
 
-// Must run before any provider request: proxies that gzip streamed responses
-// without a content-encoding header otherwise break every streaming model.
-installStreamDecompressionFix();
+// Chromium uses the system proxy even when a Finder launch has no shell proxy variables.
+installProviderFetch((input, init) => net.fetch(input instanceof URL ? input.href : input, {
+	...init,
+	bypassCustomProtocolHandlers: true,
+}));
 
 function iconPath(): string | undefined {
 	for (const p of [join(__dirname, "../../build/icon.png"), join(process.resourcesPath, "icon.png")]) {

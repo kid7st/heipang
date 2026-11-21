@@ -1664,6 +1664,7 @@ const hooks = globalThis.__heipangAppTest;
 export const app = hooks.app;
 export const dialog = { showErrorBox: (title, message) => hooks.errors.push({ title, message }) };
 export const nativeImage = {};
+export const net = {};
 export const shell = {};
 export class BrowserWindow extends EventEmitter {
  constructor() { super(); this.webContents = { setWindowOpenHandler() {} }; }
@@ -1672,7 +1673,7 @@ export class BrowserWindow extends EventEmitter {
 }` };
 					if (args.path === "./driver.js") return { contents: 'export class Driver { constructor() { return globalThis.__heipangAppTest.driver; } }' };
 					if (args.path === "./ipc.js") return { contents: "export const registerIpc = () => {};" };
-					return { contents: "export const installStreamDecompressionFix = () => {};" };
+					return { contents: "export const installProviderFetch = () => {};" };
 				});
 			},
 		}],
