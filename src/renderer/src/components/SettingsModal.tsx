@@ -7,91 +7,144 @@ import type {
 	PiSettings,
 	ResourcesPayload,
 	ThinkingLevel,
-	UpdateCheck,
+	UpdateState,
 } from "../../../shared/types";
 import { CloseIcon } from "./icons";
+import { Markdown } from "./Markdown";
 import { ModelManager } from "./ModelManager";
 
-type UpdState =
-	| { kind: "idle" }
-	| { kind: "checking" }
-	| { kind: "checked"; res: UpdateCheck }
-	| { kind: "downloading"; version: string; pct: number }
-	| { kind: "installing"; version: string };
+function formatCheckedAt(ts?: number): string {
+	if (!ts) return "";
+	const diffMin = Math.floor((Date.now() - ts) / 60_000);
+	if (diffMin < 1) return "just now";
+	if (diffMin < 60) return `${diffMin}m ago`;
+	return new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
 
-function UpdateCard() {
-	const [version, setVersion] = useState("");
-	const [st, setSt] = useState<UpdState>({ kind: "idle" });
+function UpdateCard({
+	updateState,
+	guiSettings,
+	onUpdateGui,
+	onCheckUpdate,
+	onInstallUpdate,
+}: {
+	updateState: UpdateState | null;
+	guiSettings: GuiSettings;
+	onUpdateGui: (partial: Partial<GuiSettings>) => void;
+	onCheckUpdate: () => Promise<void>;
+	onInstallUpdate: () => void;
+}) {
+	const [fallbackVersion, setFallbackVersion] = useState("");
+	const [checkingLocal, setCheckingLocal] = useState(false);
 
 	useEffect(() => {
-		window.pi.getVersion().then(setVersion);
-		const off = window.pi.onEvent((e) => {
-			if (e.type !== "updateProgress") return;
-			if (e.phase === "download") setSt((s) => (s.kind === "downloading" ? { ...s, pct: e.pct ?? s.pct } : s));
-			else if (e.phase === "install" || e.phase === "relaunch")
-				setSt((s) => (s.kind === "downloading" ? { kind: "installing", version: s.version } : s));
-			else if (e.phase === "error")
-				setSt({ kind: "checked", res: { current: version, hasUpdate: false, error: e.message } });
-		});
-		return off;
-	}, [version]);
+		if (!updateState?.current) {
+			window.pi.getVersion().then(setFallbackVersion).catch(() => {});
+		}
+	}, [updateState?.current]);
 
-	const check = async () => {
-		setSt({ kind: "checking" });
-		setSt({ kind: "checked", res: await window.pi.checkForUpdate() });
-	};
-	const install = (res: UpdateCheck) => {
-		if (!res.url || !res.latest) return;
-		setSt({ kind: "downloading", version: res.latest, pct: 0 });
-		window.pi.installUpdate(res.url);
+	const current = updateState?.current || fallbackVersion;
+	const status = updateState?.status ?? "idle";
+	const checking = checkingLocal || status === "checking";
+	const downloading = status === "downloading";
+	const installing = status === "installing";
+	const hasUpdate = (status === "available" || status === "downloaded") && !!updateState?.url && !!updateState?.latest;
+	const skipped = hasUpdate && guiSettings.skippedUpdateVersion === updateState?.latest;
+
+	const handleCheck = async () => {
+		setCheckingLocal(true);
+		try {
+			await onCheckUpdate();
+		} finally {
+			setCheckingLocal(false);
+		}
 	};
 
 	return (
-		<div className="card">
-			<div className="card-label">Software update</div>
-			<div className="setting-note" style={{ margin: "0 0 8px" }}>Current version {version || "…"}</div>
+		<div className="card upd-card">
+			<div className="upd-card-head">
+				<div>
+					<div className="card-label">Software update</div>
+					<div className="setting-note" style={{ margin: "4px 0 0" }}>
+						Current version v{current || "…"}
+						{updateState?.channel ? ` (${updateState.channel})` : ""}
+						{updateState?.checkedAt ? ` · Checked ${formatCheckedAt(updateState.checkedAt)}` : ""}
+					</div>
+				</div>
+				<div className="upd-card-actions">
+					<button
+						className="btn btn-sm"
+						onClick={handleCheck}
+						disabled={checking || downloading || installing}
+						type="button"
+					>
+						{checking ? "Checking…" : "Check for update"}
+					</button>
+					{hasUpdate && (
+						<button className="btn btn-sm btn-send" onClick={onInstallUpdate} type="button">
+							{status === "downloaded" ? "Restart & update" : "Download & update"}
+						</button>
+					)}
+				</div>
+			</div>
 
-			{st.kind === "downloading" && (
+			<div className="upd-toggles">
+				<label className="card-toggle">
+					<input
+						type="checkbox"
+						checked={guiSettings.autoCheckUpdates}
+						onChange={(e) => onUpdateGui({ autoCheckUpdates: e.target.checked })}
+					/>
+					Automatically check for updates
+				</label>
+				<label className="card-toggle">
+					<input
+						type="checkbox"
+						checked={guiSettings.autoDownloadUpdates}
+						disabled={!guiSettings.autoCheckUpdates}
+						onChange={(e) => onUpdateGui({ autoDownloadUpdates: e.target.checked })}
+					/>
+					Automatically download updates in background
+				</label>
+			</div>
+
+			{downloading && (
 				<div className="setting-note" style={{ margin: 0 }}>
-					Downloading {st.version}… {st.pct}%
+					Downloading v{updateState?.latest}… {updateState?.pct ?? 0}%
 					<div className="upd-bar">
-						<div className="upd-bar-fill" style={{ width: `${st.pct}%` }} />
+						<div className="upd-bar-fill" style={{ width: `${updateState?.pct ?? 0}%` }} />
 					</div>
 				</div>
 			)}
-			{st.kind === "installing" && (
-				<div className="setting-note" style={{ margin: 0 }}>Installing {st.version}, restarting…</div>
-			)}
-
-			{st.kind === "checked" && st.res.error && (
-				<div className="setting-note" style={{ margin: "0 0 8px", color: "#b23a2e" }}>
-					Check failed: {st.res.error}
+			{installing && (
+				<div className="setting-note" style={{ margin: 0 }}>
+					Installing v{updateState?.latest}, restarting…
 				</div>
 			)}
-			{st.kind === "checked" && !st.res.error && !st.res.hasUpdate && (
-				<div className="setting-note" style={{ margin: "0 0 8px" }}>You're on the latest version.</div>
-			)}
-			{st.kind === "checked" && st.res.hasUpdate && (
-				<div className="setting-note" style={{ margin: "0 0 8px", color: "#155e3a" }}>
-					Update available · {st.res.latest}
-					{st.res.notes ? ` — ${st.res.notes}` : ""}
+			{status === "error" && updateState?.error && (
+				<div className="setting-note" style={{ margin: 0, color: "#b23a2e" }}>
+					Update failed: {updateState.error}
 				</div>
 			)}
-
-			{st.kind === "checked" && st.res.hasUpdate ? (
-				<button className="btn btn-sm" style={{ marginLeft: 0 }} onClick={() => install(st.res)} type="button">
-					Download &amp; install
-				</button>
-			) : (
-				<button
-					className="btn btn-sm"
-					style={{ marginLeft: 0 }}
-					onClick={check}
-					disabled={st.kind === "checking" || st.kind === "downloading" || st.kind === "installing"}
-					type="button"
-				>
-					{st.kind === "checking" ? "Checking…" : "Check for update"}
-				</button>
+			{status === "not-available" && updateState?.manual && (
+				<div className="setting-note" style={{ margin: 0 }}>
+					You're on the latest version.
+				</div>
+			)}
+			{hasUpdate && (
+				<div className="upd-card-available">
+					<div className="setting-note" style={{ margin: 0, color: "#155e3a", fontWeight: 600 }}>
+						{status === "downloaded"
+							? `v${updateState?.latest} is downloaded and ready to install`
+							: `Update available · v${updateState?.latest}`}
+						{skipped ? " (skipped)" : ""}
+					</div>
+					{updateState?.notes && (
+						<div className="upd-notes-preview">
+							<Markdown text={updateState.notes} />
+						</div>
+					)}
+				</div>
 			)}
 		</div>
 	);
@@ -135,6 +188,9 @@ export function SettingsModal({
 	onExtensionsChange,
 	onEditGlobalMemory,
 	initialTab = "general",
+	updateState,
+	onCheckUpdate,
+	onInstallUpdate,
 }: {
 	onClose: () => void;
 	guiSettings: GuiSettings;
@@ -144,6 +200,9 @@ export function SettingsModal({
 	onExtensionsChange?: () => void;
 	onEditGlobalMemory: () => void;
 	initialTab?: Tab;
+	updateState: UpdateState | null;
+	onCheckUpdate: () => Promise<void>;
+	onInstallUpdate: () => void;
 }) {
 	const [tab, setTab] = useState<Tab>(initialTab);
 	const [pi, setPi] = useState<PiSettings | null>(null);
@@ -273,7 +332,13 @@ export function SettingsModal({
 								Edit global memory
 							</button>
 						</div>
-						<UpdateCard />
+						<UpdateCard
+							updateState={updateState}
+							guiSettings={guiSettings}
+							onUpdateGui={updateGui}
+							onCheckUpdate={onCheckUpdate}
+							onInstallUpdate={onInstallUpdate}
+						/>
 					</div>
 				)}
 

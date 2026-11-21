@@ -1,6 +1,6 @@
 {
   "name": "heipang",
-  "version": "0.4.17",
+  "version": "0.4.18",
   "updateChannel": "stable",
   "description": "HEIPANG — fast, model-agnostic desktop GUI for pi",
   "main": "./out/main/index.js",
@@ -16,6 +16,7 @@
     "test:deepseek": "node scripts/deepseek-regression.mjs",
     "test:gemini": "node scripts/gemini-regression.mjs",
     "test:antigravity": "node scripts/antigravity-regression.mjs",
+    "test:updater": "node scripts/updater-regression.mjs",
     "start": "electron-vite preview",
     "pack:mac": "electron-vite build && electron-builder --mac --arm64",
     "pack:mac:dir": "electron-vite build && electron-builder --mac --arm64 --dir",

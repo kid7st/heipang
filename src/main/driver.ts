@@ -63,6 +63,8 @@ const DEFAULT_GUI_SETTINGS: GuiSettings = {
 	rightPanelWidth: 320,
 	sidebarCollapsed: false,
 	disabledExtensions: [],
+	autoCheckUpdates: true,
+	autoDownloadUpdates: true,
 };
 
 // Retain version-gate recovery until its original failure is verified against the bundled SDK.
@@ -388,6 +390,9 @@ export class Driver {
 				disabledExtensions: Array.isArray(raw.disabledExtensions)
 					? raw.disabledExtensions.filter((p: unknown): p is string => typeof p === "string")
 					: [],
+				autoCheckUpdates: typeof raw.autoCheckUpdates === "boolean" ? raw.autoCheckUpdates : DEFAULT_GUI_SETTINGS.autoCheckUpdates,
+				autoDownloadUpdates: typeof raw.autoDownloadUpdates === "boolean" ? raw.autoDownloadUpdates : DEFAULT_GUI_SETTINGS.autoDownloadUpdates,
+				skippedUpdateVersion: typeof raw.skippedUpdateVersion === "string" && raw.skippedUpdateVersion ? raw.skippedUpdateVersion : undefined,
 			};
 		} catch {
 			return { ...DEFAULT_GUI_SETTINGS };

@@ -3,7 +3,14 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Driver } from "./driver.js";
 import type { AntigravitySettingsInput, StreamEvent, Task } from "../shared/types.js";
-import { checkForUpdate, downloadAndInstall } from "./updater.js";
+import {
+	checkForUpdate,
+	downloadAndInstall,
+	downloadUpdate,
+	getUpdateState,
+	startAutoUpdateScheduler,
+	syncAutoUpdateSettings,
+} from "./updater.js";
 import { InputRequests, type InputBridge } from "./input-requests.js";
 
 /**
@@ -117,7 +124,11 @@ export function registerIpc(driver: Driver, getWindow: () => BrowserWindow | nul
 	h("pi:getPiSettings", () => driver.getPiSettings());
 	h("pi:setPiSettings", (p: any) => driver.setPiSettings(p));
 	h("pi:getGuiSettings", () => driver.getGuiSettings());
-	h("pi:setGuiSettings", (p: any) => driver.setGuiSettings(p));
+	h("pi:setGuiSettings", (p: any) => {
+		const next = driver.setGuiSettings(p);
+		syncAutoUpdateSettings(next);
+		return next;
+	});
 	h("pi:openPath", async (p: string) => {
 		await shell.openPath(p);
 	});
@@ -132,10 +143,18 @@ export function registerIpc(driver: Driver, getWindow: () => BrowserWindow | nul
 
 	// updates
 	h("pi:getVersion", () => app.getVersion());
-	h("pi:checkForUpdate", () => checkForUpdate());
+	h("pi:getUpdateState", () => getUpdateState());
+	h("pi:checkForUpdate", (options?: { background?: boolean }) => checkForUpdate(options));
+	h("pi:downloadUpdate", (url: string) => downloadUpdate(url));
 	h("pi:installUpdate", (url: string) =>
 		downloadAndInstall(url, (phase, pct, message) => send({ type: "updateProgress", phase, pct, message }), () => driver.shutdown()),
 	);
+	if (typeof driver.getGuiSettings === "function") {
+		startAutoUpdateScheduler({
+			getSettings: () => driver.getGuiSettings(),
+			onStateChange: (state) => send({ type: "updateState", state }),
+		});
+	}
 
 	// misc
 	h("pi:getHome", () => homedir());

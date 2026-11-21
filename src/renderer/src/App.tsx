@@ -9,6 +9,7 @@ import type {
 	Task,
 	ThinkingLevel,
 	UIMessage,
+	UpdateState,
 	UsageInfo,
 } from "../../shared/types";
 import heipangBg from "./assets/heipang-bg.png";
@@ -21,6 +22,7 @@ import { RequestDialog } from "./components/RequestDialog";
 import { SettingsModal } from "./components/SettingsModal";
 import { Sidebar } from "./components/Sidebar";
 import { TaskPanel } from "./components/TaskPanel";
+import { UpdateBanner, UpdateNotesModal } from "./components/UpdatePrompt";
 
 function baseName(p: string): string {
 	if (!p) return "";
@@ -57,6 +59,8 @@ export default function App() {
 		rightPanelWidth: 320,
 		sidebarCollapsed: false,
 		disabledExtensions: [],
+		autoCheckUpdates: true,
+		autoDownloadUpdates: true,
 	});
 	const [sbWidth, setSbWidth] = useState(280);
 	const [rightWidth, setRightWidth] = useState(320);
@@ -71,6 +75,9 @@ export default function App() {
 	const [toast, setToast] = useState<string | null>(null);
 	const [changingSession, setChangingSession] = useState<string | undefined>();
 	const changingSessionRef = useRef<string | undefined>(undefined);
+	const [updateState, setUpdateState] = useState<UpdateState | null>(null);
+	const [updateDismissed, setUpdateDismissed] = useState(false);
+	const [showUpdateNotes, setShowUpdateNotes] = useState(false);
 
 	const activeFileRef = useRef<string | undefined>(undefined);
 	activeFileRef.current = state?.sessionFile;
@@ -136,6 +143,7 @@ export default function App() {
 			setSbWidth(g.sidebarWidth);
 			setRightWidth(g.rightPanelWidth ?? 320);
 		})();
+		window.pi.getUpdateState?.().then(setUpdateState).catch(() => {});
 		// Startup needs one session scan. The old retry schedule scanned every
 		// JSONL four times (0/0.7/2/5s), which was especially slow with image-heavy sessions.
 		refreshSessions();
@@ -176,6 +184,10 @@ export default function App() {
 					break;
 				case "background":
 					setBgRunning(e.sessions);
+					break;
+				case "updateState":
+					setUpdateState(e.state);
+					if (e.state.manual) setUpdateDismissed(false);
 					break;
 				case "error":
 					flash(e.message);
@@ -597,6 +609,47 @@ export default function App() {
 		[loadInto, queueRefreshSessions],
 	);
 
+	const onCheckUpdate = useCallback(async () => {
+		setUpdateDismissed(false);
+		const res = await window.pi.checkForUpdate();
+		if (res.hasUpdate && res.latest && gui.skippedUpdateVersion === res.latest) {
+			setGui(await window.pi.setGuiSettings({ skippedUpdateVersion: undefined }));
+		}
+		return res;
+	}, [gui.skippedUpdateVersion]);
+
+	const onInstallUpdate = useCallback(() => {
+		const url = updateState?.url;
+		if (!url) return;
+		if ((state?.isStreaming || bgRunning.length > 0) && !confirm("An agent run is currently active. Installing the update will stop it and restart HEIPANG. Continue?")) {
+			return;
+		}
+		setShowUpdateNotes(false);
+		setUpdateDismissed(false);
+		void window.pi.installUpdate(url).catch((error) => {
+			flash(error instanceof Error ? error.message : String(error));
+		});
+	}, [updateState?.url, state?.isStreaming, bgRunning.length, flash]);
+
+	const onSkipUpdate = useCallback(async (version: string) => {
+		setUpdateDismissed(true);
+		setGui(await window.pi.setGuiSettings({ skippedUpdateVersion: version }));
+	}, []);
+
+	const onSidebarUpdateAction = useCallback(async () => {
+		if (updateState?.status === "available" || updateState?.status === "downloaded" || updateState?.status === "downloading") {
+			if (updateState.latest && gui.skippedUpdateVersion === updateState.latest) {
+				setGui(await window.pi.setGuiSettings({ skippedUpdateVersion: undefined }));
+			}
+			setUpdateDismissed(false);
+			setShowUpdateNotes(true);
+			return;
+		}
+		const res = await onCheckUpdate();
+		if (res.error) flash(`Update check failed: ${res.error}`);
+		else if (!res.hasUpdate) flash(`You're on the latest version (v${res.current}).`);
+	}, [updateState, gui.skippedUpdateVersion, onCheckUpdate, flash]);
+
 	return (
 		<div className="app" style={{ gridTemplateColumns: cols }}>
 			{!gui.sidebarCollapsed && (
@@ -621,6 +674,9 @@ export default function App() {
 					onReorderFolders={async (order) => setGui(await window.pi.setGuiSettings({ folderOrder: order }))}
 					onSettings={() => setSettingsTab("general")}
 					onCollapseSidebar={() => setCollapsed(true)}
+					updateState={updateState}
+					skippedUpdateVersion={gui.skippedUpdateVersion}
+					onUpdateAction={onSidebarUpdateAction}
 				/>
 			)}
 			{!gui.sidebarCollapsed && (
@@ -636,6 +692,19 @@ export default function App() {
 					onExpandSidebar={() => setCollapsed(false)}
 					onToggleRightPanel={toggleRightPanel}
 					onRenameActive={onRenameActive}
+				/>
+				<UpdateBanner
+					updateState={updateState}
+					dismissed={updateDismissed}
+					skippedVersion={gui.skippedUpdateVersion}
+					onInstall={onInstallUpdate}
+					onShowNotes={() => setShowUpdateNotes(true)}
+					onDismiss={() => setUpdateDismissed(true)}
+					onSkip={onSkipUpdate}
+					onRetry={() => {
+						if (updateState?.url) onInstallUpdate();
+						else void onCheckUpdate();
+					}}
 				/>
 				<div className="conv" style={{ ["--heipang-bg" as string]: `url(${heipangBg})` }}>
 					{convLoading || changingCurrentSession ? (
@@ -689,6 +758,17 @@ export default function App() {
 						void window.pi.getGuiSettings().then(setGui);
 					}}
 					onEditGlobalMemory={() => setMemory({ label: "all conversations" })}
+					updateState={updateState}
+					onCheckUpdate={async () => { await onCheckUpdate(); }}
+					onInstallUpdate={onInstallUpdate}
+				/>
+			)}
+			{showUpdateNotes && updateState && (
+				<UpdateNotesModal
+					updateState={updateState}
+					onClose={() => setShowUpdateNotes(false)}
+					onInstall={onInstallUpdate}
+					onSkip={onSkipUpdate}
 				/>
 			)}
 			{memory && <MemoryEditor cwd={memory.cwd} label={memory.label} onClose={() => setMemory(null)} />}

@@ -1,19 +1,26 @@
 import { app, net, shell } from "electron";
 import { spawn } from "node:child_process";
-import { closeSync, createWriteStream, mkdtempSync, openSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, createWriteStream, existsSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { UpdateCheck } from "../shared/types.js";
+import type { GuiSettings, UpdateCheck, UpdateState } from "../shared/types.js";
 import { MAC_INSTALL_SCRIPT, prepareMacUpdate } from "./mac-update.js";
 
 const RELEASES_API = "https://api.github.com/repos/kid7st/heipang/releases?per_page=30";
+const CHECK_TIMEOUT_MS = 15_000;
+const STARTUP_CHECK_DELAY_MS = 4_000;
+const PERIODIC_CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000;
 
-function tagPrefix(): string {
+function readChannel(): "stable" | "meta" {
 	const metadata = JSON.parse(readFileSync(join(app.getAppPath(), "package.json"), "utf8"));
-	if (metadata.updateChannel === "meta") return "meta-v";
-	if (metadata.updateChannel === "stable") return "v";
+	if (metadata.updateChannel === "meta") return "meta";
+	if (metadata.updateChannel === "stable") return "stable";
 	throw new Error("The application has no valid update channel");
+}
+
+function tagPrefix(channel: "stable" | "meta"): string {
+	return channel === "meta" ? "meta-v" : "v";
 }
 
 interface GithubRelease {
@@ -32,12 +39,19 @@ interface RemoteLatest {
 }
 
 function latestFromReleases(releases: GithubRelease[], prefix: string): RemoteLatest {
-	const release = releases.find((r) => !r.draft && !r.prerelease && r.tag_name.startsWith(prefix));
-	if (!release) throw new Error("No published release was found for this update channel");
-	const asset = (extension: string) => release.assets.find((a) => a.name.endsWith(extension))?.browser_download_url;
+	let best: { release: GithubRelease; version: string } | undefined;
+	for (const release of releases) {
+		if (release.draft || release.prerelease || !release.tag_name.startsWith(prefix)) continue;
+		const version = release.tag_name.slice(prefix.length);
+		if (!best || cmpVer(version, best.version) > 0) {
+			best = { release, version };
+		}
+	}
+	if (!best) throw new Error("No published release was found for this update channel");
+	const asset = (extension: string) => best.release.assets.find((a) => a.name.endsWith(extension))?.browser_download_url;
 	return {
-		version: release.tag_name.slice(prefix.length),
-		notes: release.body ?? undefined,
+		version: best.version,
+		notes: best.release.body ?? undefined,
 		mac: asset(".dmg"),
 		win: asset(".exe"),
 	};
@@ -57,33 +71,35 @@ function fetchText(url: string): Promise<string> {
 	return new Promise((resolve, reject) => {
 		const req = net.request({ url, redirect: "follow", cache: "no-cache" });
 		req.setHeader("Cache-Control", "no-cache");
+		req.setHeader("Accept", "application/vnd.github+json");
+		req.setHeader("User-Agent", `heipang/${app.getVersion()}`);
 		let body = "";
+		let settled = false;
+		const timer = setTimeout(() => {
+			if (settled) return;
+			settled = true;
+			req.abort();
+			reject(new Error("Update check timed out"));
+		}, CHECK_TIMEOUT_MS);
+		const done = (fn: () => void) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			fn();
+		};
 		req.on("response", (res) => {
 			if (res.statusCode && res.statusCode >= 400) {
-				reject(new Error(`HTTP ${res.statusCode}`));
 				req.abort();
+				done(() => reject(new Error(`HTTP ${res.statusCode}`)));
 				return;
 			}
 			res.on("data", (chunk) => (body += chunk.toString()));
-			res.on("end", () => resolve(body));
-			res.on("error", reject);
+			res.on("end", () => done(() => resolve(body)));
+			res.on("error", (error) => done(() => reject(error)));
 		});
-		req.on("error", reject);
+		req.on("error", (error) => done(() => reject(error)));
 		req.end();
 	});
-}
-
-export async function checkForUpdate(): Promise<UpdateCheck> {
-	const current = app.getVersion();
-	try {
-		const data = latestFromReleases(JSON.parse(await fetchText(RELEASES_API)) as GithubRelease[], tagPrefix());
-		const latest = String(data.version || "");
-		const url = process.platform === "darwin" ? data.mac : data.win;
-		const hasUpdate = !!latest && cmpVer(latest, current) > 0 && !!url;
-		return { current, latest, hasUpdate, notes: data.notes, url };
-	} catch (error) {
-		return { current, hasUpdate: false, error: error instanceof Error ? error.message : String(error) };
-	}
 }
 
 export function download(url: string, dest: string, onPct: (pct: number) => void): Promise<void> {
@@ -146,20 +162,269 @@ async function launchInstaller(command: string, args: string[], logPath: string)
 
 export type UpdatePhase = "download" | "install" | "relaunch" | "error";
 type Emit = (phase: UpdatePhase, pct?: number, message?: string) => void;
+
 let installing = false;
+let downloading = false;
+let downloadPromise: Promise<void> | undefined;
+let inFlightCheck: Promise<UpdateCheck> | undefined;
+let downloadedArtifact: { url: string; filePath: string; dir: string } | undefined;
+let updateState: UpdateState | undefined;
+const stateListeners = new Set<(state: UpdateState) => void>();
+let schedulerSettings: (() => GuiSettings) | undefined;
+let periodicTimer: ReturnType<typeof setInterval> | undefined;
+
+function ensureState(): UpdateState {
+	if (!updateState) {
+		let channel: "stable" | "meta" | undefined;
+		try { channel = readChannel(); } catch { /* ignore */ }
+		updateState = { status: "idle", current: app.getVersion(), channel };
+	}
+	return updateState;
+}
+
+function setUpdateState(next: UpdateState): UpdateState {
+	updateState = next;
+	for (const listener of stateListeners) {
+		try { listener(next); } catch { /* ignore */ }
+	}
+	return next;
+}
+
+export function getUpdateState(): UpdateState {
+	return ensureState();
+}
+
+export function cleanupDownloadedUpdate(): void {
+	if (installing || !downloadedArtifact) return;
+	const { dir } = downloadedArtifact;
+	downloadedArtifact = undefined;
+	try { rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+}
+
+function installerFilename(): string {
+	if (process.platform === "darwin") return "update.dmg";
+	if (process.platform === "win32") return "Setup.exe";
+	throw new Error("Automatic updates are supported on macOS and Windows only");
+}
+
+function maybeStartAutoDownload(state: UpdateState): void {
+	const settings = schedulerSettings?.();
+	if (!settings?.autoDownloadUpdates) return;
+	if (state.status !== "available" || !state.url || !state.latest) return;
+	if (settings.skippedUpdateVersion === state.latest) return;
+	void downloadUpdate(state.url, { background: true, latest: state.latest, notes: state.notes });
+}
+
+export async function checkForUpdate(options?: { background?: boolean }): Promise<UpdateCheck> {
+	const background = !!options?.background;
+	const current = app.getVersion();
+	const prev = ensureState();
+
+	if (prev.status === "downloading" || prev.status === "installing") {
+		return {
+			current,
+			latest: prev.latest,
+			hasUpdate: !!prev.latest && cmpVer(prev.latest, current) > 0 && !!prev.url,
+			notes: prev.notes,
+			url: prev.url,
+		};
+	}
+
+	if (inFlightCheck) return inFlightCheck;
+
+	const run = (async (): Promise<UpdateCheck> => {
+		let channel: "stable" | "meta" | undefined = prev.channel;
+		if (!background) {
+			setUpdateState({ ...prev, current, status: "checking", error: undefined, manual: true });
+		}
+		try {
+			channel = readChannel();
+			const data = latestFromReleases(JSON.parse(await fetchText(RELEASES_API)) as GithubRelease[], tagPrefix(channel));
+			const latest = String(data.version || "");
+			const url = process.platform === "darwin" ? data.mac : data.win;
+			const hasUpdate = !!latest && cmpVer(latest, current) > 0 && !!url;
+			const checkedAt = Date.now();
+
+			if (hasUpdate && url) {
+				const alreadyDownloaded = downloadedArtifact?.url === url && existsSync(downloadedArtifact.filePath);
+				const next = setUpdateState({
+					status: alreadyDownloaded ? "downloaded" : "available",
+					current,
+					channel,
+					latest,
+					notes: data.notes,
+					url,
+					pct: alreadyDownloaded ? 100 : undefined,
+					checkedAt,
+					manual: !background,
+				});
+				maybeStartAutoDownload(next);
+			} else {
+				cleanupDownloadedUpdate();
+				setUpdateState({
+					status: "not-available",
+					current,
+					channel,
+					latest: latest || undefined,
+					notes: data.notes,
+					checkedAt,
+					manual: !background,
+				});
+			}
+			return { current, latest, hasUpdate, notes: data.notes, url };
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			if (!background) {
+				setUpdateState({
+					...ensureState(),
+					current,
+					channel,
+					status: "error",
+					error: message,
+					checkedAt: Date.now(),
+					manual: true,
+				});
+			}
+			return { current, hasUpdate: false, error: message };
+		} finally {
+			inFlightCheck = undefined;
+		}
+	})();
+
+	inFlightCheck = run;
+	return run;
+}
+
+export async function downloadUpdate(
+	url: string,
+	options?: { background?: boolean; latest?: string; notes?: string },
+): Promise<void> {
+	if (installing) return;
+	if (downloading) return downloadPromise;
+	if (downloadedArtifact?.url === url && existsSync(downloadedArtifact.filePath)) {
+		const prev = ensureState();
+		setUpdateState({
+			...prev,
+			status: "downloaded",
+			url,
+			latest: options?.latest ?? prev.latest,
+			notes: options?.notes ?? prev.notes,
+			pct: 100,
+			error: undefined,
+		});
+		return;
+	}
+
+	downloading = true;
+	const background = !!options?.background;
+	const prev = ensureState();
+	const latest = options?.latest ?? prev.latest;
+	const notes = options?.notes ?? prev.notes;
+	let dir: string | undefined;
+
+	downloadPromise = (async () => {
+		try {
+			cleanupDownloadedUpdate();
+			const filename = installerFilename();
+			dir = mkdtempSync(join(tmpdir(), "heipang-up-"));
+			const filePath = join(dir, filename);
+			setUpdateState({
+				...prev,
+				status: "downloading",
+				latest,
+				notes,
+				url,
+				pct: 0,
+				error: undefined,
+				manual: !background,
+			});
+			await download(url, filePath, (pct) => {
+				setUpdateState({
+					...ensureState(),
+					status: "downloading",
+					latest,
+					notes,
+					url,
+					pct,
+					error: undefined,
+				});
+			});
+			downloadedArtifact = { url, filePath, dir };
+			setUpdateState({
+				...ensureState(),
+				status: "downloaded",
+				latest,
+				notes,
+				url,
+				pct: 100,
+				error: undefined,
+				manual: !background,
+			});
+		} catch (error) {
+			if (dir) {
+				try { rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+			}
+			const message = error instanceof Error ? error.message : String(error);
+			if (background) {
+				// Revert silently to "available" so the user can still trigger download manually.
+				setUpdateState({
+					...ensureState(),
+					status: "available",
+					latest,
+					notes,
+					url,
+					pct: undefined,
+					error: undefined,
+					manual: false,
+				});
+			} else {
+				setUpdateState({
+					...ensureState(),
+					status: "error",
+					latest,
+					notes,
+					url,
+					pct: undefined,
+					error: message,
+					manual: true,
+				});
+				throw error;
+			}
+		} finally {
+			downloading = false;
+			downloadPromise = undefined;
+		}
+	})();
+	return downloadPromise;
+}
 
 export async function downloadAndInstall(url: string, emit: Emit, beforeInstall: () => Promise<void>): Promise<void> {
 	if (installing) throw new Error("An update is already in progress");
 	installing = true;
 	let stage: string | undefined;
 	let shutdownStarted = false;
+	let tempDir: string | undefined;
 	try {
-		const dir = mkdtempSync(join(tmpdir(), "heipang-up-"));
-		emit("download", 0);
+		if (downloadPromise) await downloadPromise.catch(() => {});
+		const cached = downloadedArtifact?.url === url && existsSync(downloadedArtifact.filePath)
+			? downloadedArtifact
+			: undefined;
+		const dir = cached?.dir ?? mkdtempSync(join(tmpdir(), "heipang-up-"));
+		if (!cached) tempDir = dir;
+
+		const prev = ensureState();
 		if (process.platform === "darwin") {
-			const dmg = join(dir, "update.dmg");
-			await download(url, dmg, (pct) => emit("download", pct));
+			const dmg = cached?.filePath ?? join(dir, "update.dmg");
+			if (!cached) {
+				emit("download", 0);
+				setUpdateState({ ...prev, status: "downloading", url, pct: 0, error: undefined, manual: true });
+				await download(url, dmg, (pct) => {
+					emit("download", pct);
+					setUpdateState({ ...ensureState(), status: "downloading", url, pct, error: undefined, manual: true });
+				});
+			}
 			emit("install");
+			setUpdateState({ ...ensureState(), status: "installing", url, pct: 100, error: undefined, manual: true });
 			const boundary = process.execPath.indexOf(".app/");
 			if (boundary < 0) throw new Error("Install the application before using automatic updates");
 			const appPath = process.execPath.slice(0, boundary + 4);
@@ -176,15 +441,24 @@ export async function downloadAndInstall(url: string, emit: Emit, beforeInstall:
 			await beforeInstall();
 			await launchInstaller("/bin/bash", [script, appPath, stage, dmg, String(process.pid)], join(dir, "install.log"));
 		} else if (process.platform === "win32") {
-			const exe = join(dir, "Setup.exe");
-			await download(url, exe, (pct) => emit("download", pct));
+			const exe = cached?.filePath ?? join(dir, "Setup.exe");
+			if (!cached) {
+				emit("download", 0);
+				setUpdateState({ ...prev, status: "downloading", url, pct: 0, error: undefined, manual: true });
+				await download(url, exe, (pct) => {
+					emit("download", pct);
+					setUpdateState({ ...ensureState(), status: "downloading", url, pct, error: undefined, manual: true });
+				});
+			}
 			emit("install");
+			setUpdateState({ ...ensureState(), status: "installing", url, pct: 100, error: undefined, manual: true });
 			shutdownStarted = true;
 			await beforeInstall();
 			await launchInstaller(exe, ["/S", "--force-run"], join(dir, "install.log"));
 		} else {
 			throw new Error("Automatic updates are supported on macOS and Windows only");
 		}
+		downloadedArtifact = undefined;
 		emit("relaunch");
 		setTimeout(() => app.quit(), 700);
 	} catch (error) {
@@ -193,8 +467,50 @@ export async function downloadAndInstall(url: string, emit: Emit, beforeInstall:
 		catch (cleanupError) {
 			failure = new AggregateError([error, cleanupError], `${String(error)}; update cleanup failed: ${String(cleanupError)}`);
 		}
+		if (tempDir) {
+			try { await rm(tempDir, { recursive: true, force: true }); } catch { /* ignore */ }
+		}
 		installing = false;
 		const message = failure instanceof Error ? failure.message : String(failure);
-		emit("error", undefined, `${message}${shutdownStarted ? ". Restart the application before continuing to work." : ""}`);
+		const fullMessage = `${message}${shutdownStarted ? ". Restart the application before continuing to work." : ""}`;
+		setUpdateState({ ...ensureState(), status: "error", error: fullMessage, manual: true });
+		emit("error", undefined, fullMessage);
+	}
+}
+
+export function startAutoUpdateScheduler(options: {
+	getSettings: () => GuiSettings;
+	onStateChange: (state: UpdateState) => void;
+}): () => void {
+	schedulerSettings = options.getSettings;
+	stateListeners.add(options.onStateChange);
+
+	const runBackgroundCheck = () => {
+		if (!schedulerSettings?.().autoCheckUpdates) return;
+		void checkForUpdate({ background: true });
+	};
+
+	const startupTimer = setTimeout(runBackgroundCheck, STARTUP_CHECK_DELAY_MS);
+	startupTimer.unref();
+
+	if (!periodicTimer) {
+		periodicTimer = setInterval(runBackgroundCheck, PERIODIC_CHECK_INTERVAL_MS);
+		periodicTimer.unref();
+	}
+
+	if (typeof app.once === "function") {
+		app.once("will-quit", cleanupDownloadedUpdate);
+	}
+
+	return () => {
+		stateListeners.delete(options.onStateChange);
+	};
+}
+
+export function syncAutoUpdateSettings(settings: GuiSettings): void {
+	if (!schedulerSettings) return;
+	const state = ensureState();
+	if (settings.autoDownloadUpdates && state.status === "available") {
+		maybeStartAutoDownload(state);
 	}
 }

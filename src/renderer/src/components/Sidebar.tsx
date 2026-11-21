@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { VList } from "virtua";
-import type { SessionListItem } from "../../../shared/types";
+import type { SessionListItem, UpdateState } from "../../../shared/types";
 import { ChevronDownIcon, ChevronRightIcon, DotsIcon } from "./icons";
 
 function Svg({ children }: { children: React.ReactNode }) {
@@ -129,6 +129,9 @@ export function Sidebar({
 	onReorderFolders,
 	onSettings,
 	onCollapseSidebar,
+	updateState,
+	skippedUpdateVersion,
+	onUpdateAction,
 }: {
 	sessions: SessionListItem[];
 	activeFile?: string;
@@ -150,6 +153,9 @@ export function Sidebar({
 	onReorderFolders: (order: string[]) => void;
 	onSettings: () => void;
 	onCollapseSidebar: () => void;
+	updateState?: UpdateState | null;
+	skippedUpdateVersion?: string;
+	onUpdateAction?: () => void;
 }) {
 	const [q, setQ] = useState("");
 	const [expanded, setExpanded] = useState<Set<string>>(loadExpanded);
@@ -360,6 +366,41 @@ export function Sidebar({
 				<button className="btn btn-icon" onClick={onSettings} title="Settings" type="button">
 					⚙︎
 				</button>
+				{updateState && (
+					<button
+						className={`sidebar-upd${
+							updateState.status === "downloaded"
+								? " ready"
+								: updateState.status === "available" && updateState.latest !== skippedUpdateVersion
+									? " available"
+									: updateState.status === "downloading"
+										? " available"
+										: ""
+						}`}
+						onClick={onUpdateAction}
+						disabled={updateState.status === "checking" || updateState.status === "installing"}
+						title={
+							updateState.status === "downloaded"
+								? `Version ${updateState.latest} ready — click to review & restart`
+								: updateState.status === "available"
+									? `New version v${updateState.latest} available`
+									: "Click to check for updates"
+						}
+						type="button"
+					>
+						{updateState.status === "downloaded"
+							? `Restart to update (${updateState.latest})`
+							: updateState.status === "downloading"
+								? `Updating ${updateState.pct ?? 0}%`
+								: updateState.status === "installing"
+									? "Restarting…"
+									: updateState.status === "checking"
+										? "Checking…"
+										: updateState.status === "available" && updateState.latest !== skippedUpdateVersion
+											? `Update v${updateState.latest}`
+											: `v${updateState.current}`}
+					</button>
+				)}
 			</div>
 
 			{menu && (

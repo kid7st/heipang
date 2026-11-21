@@ -207,6 +207,9 @@ export interface GuiSettings {
 	rightPanelWidth: number;
 	sidebarCollapsed: boolean;
 	disabledExtensions: string[];
+	autoCheckUpdates: boolean;
+	autoDownloadUpdates: boolean;
+	skippedUpdateVersion?: string;
 }
 
 export interface UpdateCheck {
@@ -216,6 +219,29 @@ export interface UpdateCheck {
 	notes?: string;
 	url?: string; // platform installer url
 	error?: string;
+}
+
+export type UpdateStatus =
+	| "idle"
+	| "checking"
+	| "available"
+	| "not-available"
+	| "downloading"
+	| "downloaded"
+	| "installing"
+	| "error";
+
+export interface UpdateState {
+	status: UpdateStatus;
+	current: string;
+	channel?: "stable" | "meta";
+	latest?: string;
+	notes?: string;
+	url?: string;
+	pct?: number;
+	error?: string;
+	checkedAt?: number;
+	manual?: boolean;
 }
 
 export interface UsageInfo {
@@ -258,6 +284,7 @@ export type StreamEvent =
 	| { type: "sessionDone"; path?: string }
 	| { type: "background"; sessions: { path: string; cwd: string }[] } // sessions still running in the background
 	| { type: "updateProgress"; phase: "download" | "install" | "relaunch" | "error"; pct?: number; message?: string }
+	| { type: "updateState"; state: UpdateState }
 	| { type: "error"; message: string };
 
 export interface InputRequest {
@@ -330,7 +357,9 @@ export interface PiApi {
 	openPath(path: string): Promise<void>;
 	// updates
 	getVersion(): Promise<string>;
-	checkForUpdate(): Promise<UpdateCheck>;
+	getUpdateState(): Promise<UpdateState>;
+	checkForUpdate(options?: { background?: boolean }): Promise<UpdateCheck>;
+	downloadUpdate(url: string): Promise<void>;
 	installUpdate(url: string): Promise<void>;
 	// misc
 	pickDirectory(): Promise<string | undefined>;
