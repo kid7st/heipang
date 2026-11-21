@@ -28,8 +28,9 @@
     "@earendil-works/pi-ai": "1.5.2",
     "@earendil-works/pi-coding-agent": "1.5.2",
     "@earendil-works/pi-tui": "1.5.2",
+    "pi-antigravity": "github:kid7st/pi-antigravity#be7719c82c9f2b3d3d38393a5625e0a4bb341fd2",
     "typebox": "1.3.27",
-    "undici": "^7.28.0"
+    "undici": "8.12.4"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

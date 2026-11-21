@@ -24,10 +24,7 @@ import { SessionTasks } from "./session-tasks.js";
 import type { SessionIndexResult } from "./session-index-worker.js";
 import { ModelCatalog } from "./model-catalog.js";
 import { createPersistentModelRuntime, unresolvedCredentialErrors } from "./model-runtime.js";
-import { fetchAccountUsage } from "./antigravity/index.js";
-import { antigravityProvider } from "./antigravity/provider.js";
-import { streamAntigravity } from "./antigravity/stream/index.js";
-import { hasRelayConfiguration } from "./antigravity/client/relay.js";
+import { antigravityProvider, fetchAccountUsage, hasRelayConfiguration } from "pi-antigravity/app";
 import { AntigravitySettingsStore } from "./antigravity-settings.js";
 import { createSessionResources, loadSessionResources } from "./session-resources.js";
 import type {
@@ -393,7 +390,7 @@ export class Driver {
 
 	private async createModelRuntime(): Promise<ModelRuntime> {
 		const runtime = await createPersistentModelRuntime(this.agentDir, this.shutdownController.signal, this.credentialRevisions);
-		runtime.registerNativeProvider(antigravityProvider(streamAntigravity));
+		runtime.registerNativeProvider(antigravityProvider());
 		// Override shared OAuth credentials in memory without changing CLI authentication.
 		if (hasRelayConfiguration()) await runtime.setRuntimeApiKey("antigravity", "heipang-relay");
 		return runtime;

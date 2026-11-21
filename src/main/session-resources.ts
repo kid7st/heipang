@@ -1,10 +1,21 @@
-import { resolve } from "node:path";
+import { readFile } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import { DefaultResourceLoader, hasTrustRequiringProjectResources, ProjectTrustStore, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { antigravityExtension, antigravityImage, antigravitySearch } from "pi-antigravity/app";
 import type { InputBridge } from "./input-requests.js";
-import antigravityExtension from "./antigravity/index.js";
-import antigravitySearch from "./antigravity/features/google-search.js";
-import antigravityImage from "./antigravity/features/generate-image.js";
 import { preferBuiltinAntigravity } from "./builtin-antigravity.js";
+
+export async function readAntigravitySystemPrompt(path: string): Promise<string | undefined> {
+	let text: string;
+	try {
+		text = await readFile(path, "utf8");
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+		throw error;
+	}
+	if (!text.trim()) throw new Error(`Antigravity system prompt override is empty: ${path}`);
+	return text;
+}
 
 function extensionKeys(path: string): string[] {
 	return path.startsWith("<") || path.startsWith("builtin:") ? [path] : [path, resolve(path)];
@@ -29,7 +40,11 @@ export function createSessionResources(cwd: string, agentDir: string, getDisable
 
 	const resourceLoader = new DefaultResourceLoader({
 		cwd, agentDir, settingsManager,
-		extensionFactories: [antigravityExtension, antigravitySearch, antigravityImage],
+		extensionFactories: [
+			(pi) => antigravityExtension(pi, () => readAntigravitySystemPrompt(join(agentDir, "heipang-antigravity-system-prompt.txt"))),
+			antigravitySearch,
+			antigravityImage,
+		],
 		extensionsOverride: (base) => {
 			const result = preferBuiltinAntigravity(base);
 			const disabled = new Set((getDisabledExtensions?.() ?? []).flatMap(extensionKeys));
